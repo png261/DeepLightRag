@@ -1,0 +1,42 @@
+# Visual-Graph RAG Dependencies
+# Core ML/AI
+mlx>=0.21.0
+mlx-lm>=0.19.0
+transformers>=4.40.0
+torch>=2.0.0
+torchvision>=0.15.0
+pillow>=10.0.0
+
+# PDF Processing
+pdf2image>=1.16.0
+PyMuPDF>=1.23.0
+
+# Graph Database
+networkx>=3.0
+numpy>=1.24.0
+
+# Vector Storage
+faiss-cpu>=1.7.4
+sentence-transformers>=2.2.0
+
+# LLM Integration
+openai>=1.0.0
+httpx>=0.25.0
+
+# LightRAG (for comparison)
+lightrag-hku>=0.1.0
+
+# Utilities
+tqdm>=4.65.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+tiktoken>=0.5.0
+rich>=13.0.0
+
+# Streamlit Web Interface
+streamlit>=1.30.0
+plotly>=5.18.0
+pandas>=2.0.0
+
+# Optional: For better OCR fallback
+easyocr>=1.7.0

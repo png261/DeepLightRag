@@ -21,9 +21,18 @@ class DualLayerGraph:
     Cross-Layer: Connections bridging spatial ↔ semantic
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        device: str = "cpu",
+        enable_gpu_acceleration: bool = False,
+        ner_config: Optional[Dict] = None,
+        re_config: Optional[Dict] = None,
+        llm=None,
+    ):
         self.visual_spatial = VisualSpatialGraph()
-        self.entity_relationship = EntityRelationshipGraph()
+        self.entity_relationship = EntityRelationshipGraph(
+            device=device, ner_config=ner_config, re_config=re_config, llm=llm
+        )
 
         # Cross-layer mappings
         self.entity_to_regions: Dict[str, List[str]] = {}  # Entity → Visual Regions

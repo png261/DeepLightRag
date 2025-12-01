@@ -46,9 +46,7 @@ class DeepSeekLLM(AbstractLLMProvider):
                 "Install with: pip install 'deeplightrag[mlx]'"
             ) from e
 
-    def _call_model(
-        self, messages: list[dict[str, str]], temperature: float | None = None
-    ) -> str:
+    def _call_model(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         """
         Call the DeepSeek model with given messages.
 

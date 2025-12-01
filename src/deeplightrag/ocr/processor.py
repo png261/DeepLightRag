@@ -340,3 +340,77 @@ class PDFProcessor:
             results.append(result)
 
         return results
+
+    def simulate_pdf_from_text(self, text_content: str) -> List[PageOCRResult]:
+        """
+        Simulate PDF processing from plain text content (for testing)
+
+        Args:
+            text_content: Plain text content to simulate
+
+        Returns:
+            List of simulated PageOCRResult objects
+        """
+        from .deepseek_ocr import VisualRegion, BoundingBox, VisualToken, PageOCRResult
+        import numpy as np
+
+        # Split text into sections (simulate regions)
+        sections = text_content.split("\n\n")
+        regions = []
+
+        y_position = 50
+        for i, section in enumerate(sections):
+            if section.strip():
+                # Create visual tokens (simulate compression)
+                tokens = []
+                words = section.split()
+                for j, word in enumerate(words):
+                    token = VisualToken(
+                        token_id=j,
+                        embedding=np.random.rand(256),  # Random embedding
+                        confidence=0.95,
+                        region_type="text",
+                        spatial_position=(j * 0.1, 0),
+                        compression_method="simulated",
+                    )
+                    tokens.append(token)
+
+                # Determine block type
+                block_type = "paragraph"
+                if section.startswith("#"):
+                    block_type = "header"
+                elif "|" in section or "Model" in section and "Score" in section:
+                    block_type = "table"
+                elif section.startswith("Abstract:"):
+                    block_type = "abstract"
+
+                # Create visual region
+                region = VisualRegion(
+                    region_id=f"region_{i}",
+                    page_num=1,
+                    block_type=block_type,
+                    bbox=BoundingBox(50, y_position, 550, y_position + 100),
+                    compressed_tokens=tokens,
+                    text_content=section.strip(),
+                    markdown_content=section.strip(),
+                    token_count=len(words),
+                    confidence=0.95,
+                    metadata={"simulated": True, "section_index": i},
+                )
+                regions.append(region)
+                y_position += 120
+
+        # Create page result
+        total_tokens = sum(len(r.compressed_tokens) for r in regions)
+
+        page_result = PageOCRResult(
+            page_num=1,
+            width=600,
+            height=800,
+            regions=regions,
+            total_tokens=total_tokens,
+            processing_time=0.5,  # Simulated processing time
+        )
+
+        print(f"Simulated OCR result: {len(regions)} regions, {total_tokens} tokens")
+        return [page_result]

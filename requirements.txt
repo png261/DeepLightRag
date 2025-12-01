@@ -21,6 +21,7 @@ sentence-transformers>=2.2.0
 
 # LLM Integration
 openai>=1.0.0
+google-generativeai>=0.8.0
 httpx>=0.25.0
 
 # LightRAG (for comparison)
@@ -40,3 +41,19 @@ pandas>=2.0.0
 
 # Optional: For better OCR fallback
 easyocr>=1.7.0
+
+# NEW: Advanced NER with GLiNER
+gliner>=0.2.0
+
+# NEW: Advanced Relation Extraction with OpenNRE
+opennre>=1.1.0
+
+# NEW: MLX Vision-Language Model
+mlx-vlm>=0.0.12
+
+# NEW: State-of-the-art RE with DeBERTa/BERT (ACE05/TACRED)
+transformers>=4.30.0
+torch>=2.0.0
+
+# NEW: SciSpaCy for scientific text processing
+scispacy>=0.5.0

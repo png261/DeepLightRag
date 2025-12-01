@@ -76,6 +76,33 @@ def truncate_text(text: str, max_length: int = 100) -> str:
     return text[: max_length - 3] + "..."
 
 
+def compress_text(text: str, max_length: int = 4000) -> str:
+    """
+    Compress text to fit within token limits
+
+    Args:
+        text: Input text to compress
+        max_length: Maximum character length (approximate)
+
+    Returns:
+        Compressed text
+    """
+    if len(text) <= max_length:
+        return text
+
+    # Simple compression: keep first and last portions
+    quarter = max_length // 4
+    half_remaining = (max_length - quarter) // 2
+
+    start_portion = text[:half_remaining]
+    end_portion = text[-half_remaining:]
+
+    # Add compression indicator
+    compression_note = f"\n... [COMPRESSED: {len(text) - max_length} chars omitted] ..."
+
+    return start_portion + compression_note + end_portion
+
+
 class Timer:
     """Context manager for timing operations"""
 

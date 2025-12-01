@@ -80,6 +80,7 @@ class LLMFactory:
 def _register_builtin_providers():
     """Register built-in LLM providers"""
     import logging
+
     logger = logging.getLogger(__name__)
 
     # Core providers
@@ -92,17 +93,21 @@ def _register_builtin_providers():
     LLMFactory.register_provider("anthropic", AnthropicLLM)
 
     # Optional providers - handle import errors gracefully
-    _register_optional_provider("huggingface", ".huggingface_provider", "HuggingFaceLLM", logger)
-    _register_optional_provider("ollama", ".ollama_provider", "OllamaLLM", logger)
-    _register_optional_provider("litellm", ".litellm_provider", "LiteLLMProvider", logger)
+    _register_optional_provider("gemini", ".gemini_provider", "GeminiProvider", logger)
 
 
-def _register_optional_provider(provider_name: str, module_path: str, class_name: str, logger) -> None:
+def _register_optional_provider(
+    provider_name: str, module_path: str, class_name: str, logger
+) -> None:
     """Register an optional provider, skipping on import errors"""
     try:
-        module = __import__(module_path, fromlist=[class_name], level=1)
+        # Import the module using importlib for better error handling
+        import importlib
+
+        module = importlib.import_module(module_path, package=__package__)
         provider_class = getattr(module, class_name)
         LLMFactory.register_provider(provider_name, provider_class)
+        logger.debug(f"Registered optional provider '{provider_name}'")
     except ImportError as e:
         logger.debug(f"Optional provider '{provider_name}' skipped: {e}")
     except Exception as e:

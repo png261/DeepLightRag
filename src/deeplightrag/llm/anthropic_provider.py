@@ -46,9 +46,7 @@ class AnthropicLLM(AbstractLLMProvider):
                 "Install with: pip install 'deeplightrag[llm]' or 'langchain-anthropic'"
             )
 
-        api_key = self._get_or_raise_api_key(
-            self.config.api_key, "ANTHROPIC_API_KEY", "Anthropic"
-        )
+        api_key = self._get_or_raise_api_key(self.config.api_key, "ANTHROPIC_API_KEY", "Anthropic")
 
         return ChatAnthropic(
             api_key=api_key,
@@ -59,9 +57,7 @@ class AnthropicLLM(AbstractLLMProvider):
             max_retries=self.config.retry_attempts,
         )
 
-    def _call_model(
-        self, messages: list[dict[str, str]], temperature: float | None = None
-    ) -> str:
+    def _call_model(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         """
         Call the Anthropic model with given messages.
 

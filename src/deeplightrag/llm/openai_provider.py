@@ -46,9 +46,7 @@ class OpenAILLM(AbstractLLMProvider):
                 "Install with: pip install 'deeplightrag[llm]' or 'langchain-openai'"
             )
 
-        api_key = self._get_or_raise_api_key(
-            self.config.api_key, "OPENAI_API_KEY", "OpenAI"
-        )
+        api_key = self._get_or_raise_api_key(self.config.api_key, "OPENAI_API_KEY", "OpenAI")
 
         return ChatOpenAI(
             api_key=api_key,
@@ -60,9 +58,7 @@ class OpenAILLM(AbstractLLMProvider):
             max_retries=self.config.retry_attempts,
         )
 
-    def _call_model(
-        self, messages: list[dict[str, str]], temperature: float | None = None
-    ) -> str:
+    def _call_model(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
         """
         Call the OpenAI model with given messages.
 

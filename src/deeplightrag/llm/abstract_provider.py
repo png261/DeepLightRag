@@ -61,12 +61,12 @@ class AbstractLLMProvider(BaseLLM):
             logger.error(f"Failed to initialize {self.config.provider}: {e}")
             raise
 
-    @abstractmethod
     def initialize_client(self) -> Any:
         """
         Initialize and return the LLM client.
 
-        This method must be implemented by subclasses to create their specific client.
+        Default implementation for providers that don't need special initialization.
+        Subclasses can override this method for provider-specific initialization.
 
         Returns:
             The initialized LLM client
@@ -75,16 +75,17 @@ class AbstractLLMProvider(BaseLLM):
             ImportError: If required dependencies are not installed
             ValueError: If configuration is invalid
         """
-        raise NotImplementedError
+        # Default implementation - return self as the client
+        return self
 
-    @abstractmethod
     def _call_model(
         self, messages: list[dict[str, str]], temperature: Optional[float] = None
     ) -> str:
         """
         Call the LLM model with given messages.
 
-        This method must be implemented by subclasses with provider-specific logic.
+        Default implementation that extracts content and uses generate method.
+        Subclasses should override this method for provider-specific logic.
 
         Args:
             messages: List of message dicts with 'role' and 'content' keys
@@ -96,11 +97,24 @@ class AbstractLLMProvider(BaseLLM):
         Raises:
             RuntimeError: If API call fails
         """
-        raise NotImplementedError
+        # Extract user message and any system context
+        user_message = ""
+        system_message = ""
 
-    def generate(
-        self, context: str, query: str, system_prompt: Optional[str] = None
-    ) -> str:
+        for msg in messages:
+            if msg.get("role") == "user":
+                user_message = msg.get("content", "")
+            elif msg.get("role") == "system":
+                system_message = msg.get("content", "")
+
+        # Use generate method if available
+        if hasattr(self, "generate") and callable(getattr(self, "generate")):
+            return self.generate(context="", query=user_message, system_prompt=system_message)
+
+        # Fallback response
+        return f"Response to: {user_message}"
+
+    def generate(self, context: str, query: str, system_prompt: Optional[str] = None) -> str:
         """
         Generate answer from context and query.
 
@@ -211,9 +225,7 @@ class AbstractLLMProvider(BaseLLM):
             raise ValueError("Empty response from model")
         return response.strip()
 
-    def _build_messages(
-        self, system_prompt: str, context: str, query: str
-    ) -> list[dict[str, str]]:
+    def _build_messages(self, system_prompt: str, context: str, query: str) -> list[dict[str, str]]:
         """
         Build message list in OpenAI format.
 
@@ -303,9 +315,7 @@ class AbstractLLMProvider(BaseLLM):
         return len(text.split()) + len(re.findall(r"\S+", text))
 
     @classmethod
-    def _get_or_raise_api_key(
-        cls, key: Optional[str], env_var: str, provider_name: str
-    ) -> str:
+    def _get_or_raise_api_key(cls, key: Optional[str], env_var: str, provider_name: str) -> str:
         """
         Get API key from argument or environment variable.
 

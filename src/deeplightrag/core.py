@@ -23,40 +23,26 @@ logger = logging.getLogger(__name__)
 
 
 class DeepLightRAG:
-    """
-    DeepLightRAG System
-
-    Efficient Document-based RAG with:
-    - DeepSeek-OCR for vision-text compression
-    - Dual-Layer Graph (Visual-Spatial + Entity-Relationship)
-    - Adaptive Token Budgeting
-    - DeepSeek R1 for LLM generation
-    """
-
     def __init__(self, config: Optional[Dict] = None, storage_dir: str = "./deeplightrag_data"):
-        """
-        Initialize DeepLightRAG
-
-        Args:
-            config: Configuration dictionary
-            storage_dir: Directory for storing graphs and indices
-        """
         self.config = config or self._default_config()
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize components
+        # Auto-detect GPU and optimize configuration
+        self._setup_gpu_optimization()
+
         print("=" * 60)
         print("  DeepLightRAG System")
         print("  Efficient Document-based RAG with Vision-Text Compression")
+        if hasattr(self, "device") and self.device == "cuda":
+            print(f"  🎮 GPU Acceleration: {self.gpu_name}")
         print("=" * 60)
 
         self._init_ocr()
+        self._init_llm()
         self._init_graph()
         self._init_retriever()
-        self._init_llm()
 
-        # Statistics
         self.stats = {
             "documents_indexed": 0,
             "queries_processed": 0,
@@ -64,66 +50,236 @@ class DeepLightRAG:
             "total_tokens_saved": 0,
         }
 
+    def cleanup_gpu_memory(self):
+        """Clean up GPU memory if available"""
+        if hasattr(self, "device") and self.device == "cuda":
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+                print("🧹 GPU memory cleaned")
+            except Exception as e:
+                print(f"⚠️ GPU cleanup warning: {e}")
+
+    def _setup_gpu_optimization(self):
+        """Auto-detect and configure GPU settings"""
+        try:
+            import torch
+
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+            if self.device == "cuda":
+                self.gpu_name = torch.cuda.get_device_name(0)
+                self.gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+
+                # Auto-configure for GPU
+                if "ocr" in self.config:
+                    self.config["ocr"]["device"] = "cuda"
+                    self.config["ocr"]["torch_dtype"] = "float16"
+                if "ner" in self.config:
+                    self.config["ner"]["device"] = "cuda"
+                if "relation_extraction" in self.config:
+                    self.config["relation_extraction"]["device"] = "cuda"
+
+        except ImportError:
+            self.device = "cpu"
+
     def _default_config(self) -> Dict:
-        """Default configuration"""
-        return {
-            "ocr": {
+        """Default configuration with auto GPU detection"""
+        import torch
+
+        # Auto-detect optimal model based on hardware
+        if torch.cuda.is_available():
+            # GPU configuration - better models
+            ocr_config = {
+                "model_name": "deepseek-ai/deepseek-ocr",
+                "quantization": "none",
+                "resolution": "large",
+                "device": "cuda",
+                "torch_dtype": "float16",
+                "batch_size": 4,
+                "enable_visual_embeddings": True,
+                "embedding_compression": "pca",
+                "target_embedding_dim": 512,
+            }
+            ner_config = {
+                "primary_model": "gliner",
+                "device": "cuda",
+                "gliner": {
+                    "model_name": "urchade/gliner_large-v2.1",
+                    "confidence_threshold": 0.3,
+                    "device": "cuda",
+                    "torch_dtype": "float16",
+                    "batch_size": 16,
+                },
+                "bert": {
+                    "model_name": "microsoft/deberta-v3-large",
+                    "confidence_threshold": 0.4,
+                    "device": "cuda",
+                    "torch_dtype": "float16",
+                },
+            }
+            re_config = {
+                "primary_model": "deberta",
+                "device": "cuda",
+                "deberta": {
+                    "model_name": "microsoft/deberta-v3-large",
+                    "confidence_threshold": 0.4,
+                    "device": "cuda",
+                    "torch_dtype": "float16",
+                    "max_length": 768,
+                    "batch_size": 8,
+                },
+            }
+        else:
+            # CPU configuration - lighter models
+            ocr_config = {
                 "model_name": "mlx-community/DeepSeek-OCR-4bit",
                 "quantization": "4bit",
                 "resolution": "base",
-            },
+                "device": "cpu",
+                "enable_visual_embeddings": True,
+                "embedding_compression": "pca",
+                "target_embedding_dim": 256,
+            }
+            ner_config = {
+                "primary_model": "gliner",
+                "device": "cpu",
+                "gliner": {
+                    "model_name": "urchade/gliner_base",
+                    "confidence_threshold": 0.4,
+                    "device": "cpu",
+                },
+            }
+            re_config = {
+                "primary_model": "deberta",
+                "device": "cpu",
+                "deberta": {
+                    "model_name": "microsoft/deberta-v3-base",
+                    "confidence_threshold": 0.5,
+                    "device": "cpu",
+                },
+            }
+
+        return {
+            "ocr": ocr_config,
             "llm": {
-                "provider": "deepseek",  # deepseek, openai, anthropic, huggingface, ollama, litellm
-                "model": "mlx-community/deepseek-r1-distill-qwen-1.5b",
+                "provider": "gemini",  # ONLY for final generation
+                "model": "gemini-2.0-flash-exp",
+                "api_key": os.environ.get(
+                    "GEMINI_API_KEY", "AIzaSyB4tnFzoHhEK2a8cg1iPW1aSqoEyMa0uNY"
+                ),
                 "temperature": 0.7,
-                "max_tokens": 2048,
+                "max_tokens": 8192,
                 "top_p": 0.9,
+                "top_k": 40,
                 "timeout": 30,
                 "retry_attempts": 3,
-                "api_key": None,  # Set via environment variables or config
-                "base_url": None,  # For local models like Ollama
+                "enable_fallback": True,
             },
-            "retrieval": {"enable_adaptive": True, "default_level": 2},
+            "ner": ner_config,
+            "relation_extraction": re_config,
+            "retrieval": {
+                "enable_adaptive": True,
+                "default_level": 2,
+                "visual_weight": 0.3,
+                "enable_visual_fallback": True,
+            },
         }
 
     def _init_ocr(self):
-        """Initialize OCR components"""
-        print("\n[1/4] Initializing DeepSeek-OCR...")
+        """Initialize OCR components with GPU support"""
+        device_info = f" on {self.device}" if hasattr(self, "device") else ""
+        print(f"\n[1/4] Initializing DeepSeek-OCR{device_info}...")
         ocr_config = self.config.get("ocr", {})
-        self.ocr_model = DeepSeekOCR(
-            model_name=ocr_config.get("model_name", "mlx-community/DeepSeek-OCR-4bit"),
-            quantization=ocr_config.get("quantization", "4bit"),
-            resolution=ocr_config.get("resolution", "base"),
-        )
+
+        # Pass all GPU-related parameters
+        init_kwargs = {
+            "model_name": ocr_config.get("model_name", "mlx-community/DeepSeek-OCR-4bit"),
+            "quantization": ocr_config.get("quantization", "4bit"),
+            "resolution": ocr_config.get("resolution", "base"),
+            "enable_visual_embeddings": ocr_config.get("enable_visual_embeddings", True),
+            "embedding_compression": ocr_config.get("embedding_compression", "pca"),
+            "target_embedding_dim": ocr_config.get("target_embedding_dim", 256),
+        }
+
+        # Add GPU parameters if available
+        if "device" in ocr_config:
+            init_kwargs["device"] = ocr_config["device"]
+        if "torch_dtype" in ocr_config:
+            import torch
+
+            init_kwargs["torch_dtype"] = (
+                torch.float16 if ocr_config["torch_dtype"] == "float16" else torch.float32
+            )
+        if "batch_size" in ocr_config:
+            init_kwargs["batch_size"] = ocr_config["batch_size"]
+
+        self.ocr_model = DeepSeekOCR(**init_kwargs)
         self.pdf_processor = PDFProcessor(self.ocr_model)
-        print("  DeepSeek-OCR initialized")
+
+        visual_status = (
+            "enabled" if ocr_config.get("enable_visual_embeddings", True) else "disabled"
+        )
+        print(f"  ✅ DeepSeek-OCR initialized (Visual embeddings: {visual_status})")
 
     def _init_graph(self):
-        """Initialize graph components"""
-        print("\n[2/4] Initializing Dual-Layer Graph...")
-        self.dual_layer_graph = DualLayerGraph()
-        print("  Dual-Layer Graph initialized")
+        """Initialize graph components with GPU awareness"""
+        device_info = f" on {self.device}" if hasattr(self, "device") else ""
+        print(f"\n[3/4] Initializing Dual-Layer Graph{device_info}...")
+
+        # Pass device and configuration to graph
+        graph_kwargs = {
+            "device": getattr(self, "device", "cpu"),
+            "ner_config": self.config.get("ner", {}),
+            "re_config": self.config.get("relation_extraction", {}),
+        }
+
+        if hasattr(self, "device") and self.device == "cuda":
+            graph_kwargs["enable_gpu_acceleration"] = True
+
+        # Pass LLM for fallback functionality
+        if hasattr(self, "llm"):
+            graph_kwargs["llm"] = self.llm
+
+        self.dual_layer_graph = DualLayerGraph(**graph_kwargs)
+        print("  ✅ Dual-Layer Graph initialized")
 
     def _init_retriever(self):
-        """Initialize retrieval components"""
-        print("\n[3/4] Initializing Adaptive Retriever...")
+        """Initialize retrieval components with visual awareness"""
+        print("\n[4/4] Initializing Visual-Aware Adaptive Retriever...")
+        retrieval_config = self.config.get("retrieval", {})
+
         self.query_classifier = QueryClassifier()
-        self.retriever = AdaptiveRetriever(self.dual_layer_graph, self.query_classifier)
-        print("  Adaptive Retriever initialized")
+
+        # Use visual-aware retriever if visual embeddings are enabled
+        if self.config.get("ocr", {}).get("enable_visual_embeddings", True):
+            from .retrieval.visual_aware_retriever import VisualAwareRetriever
+
+            self.retriever = VisualAwareRetriever(
+                self.dual_layer_graph,
+                self.query_classifier,
+                visual_weight=retrieval_config.get("visual_weight", 0.3),
+                enable_visual_fallback=retrieval_config.get("enable_visual_fallback", True),
+            )
+            print("  Visual-Aware Retriever initialized")
+        else:
+            self.retriever = AdaptiveRetriever(self.dual_layer_graph, self.query_classifier)
+            print("  Traditional Adaptive Retriever initialized")
 
     def _init_llm(self):
-        """Initialize LLM components"""
-        print("\n[4/4] Initializing LLM...")
+        """Initialize LLM components - ONLY for generation phase"""
+        print("\n[2/4] Initializing LLM for GENERATION ONLY...")
         llm_config_dict = self.config.get("llm", {})
 
         try:
             # Create LLMConfig from dictionary
             llm_config = LLMConfig(
-                provider=llm_config_dict.get("provider", "deepseek"),
-                model=llm_config_dict.get("model", "mlx-community/deepseek-r1-distill-qwen-1.5b"),
+                provider=llm_config_dict.get("provider", "gemini"),
+                model=llm_config_dict.get("model", "gemini-1.5-pro"),
                 api_key=llm_config_dict.get("api_key"),
                 temperature=llm_config_dict.get("temperature", 0.7),
-                max_tokens=llm_config_dict.get("max_tokens", 2048),
+                max_tokens=llm_config_dict.get("max_tokens", 8192),
                 top_p=llm_config_dict.get("top_p", 0.9),
                 top_k=llm_config_dict.get("top_k", 40),
                 frequency_penalty=llm_config_dict.get("frequency_penalty", 0.0),
@@ -135,12 +291,16 @@ class DeepLightRAG:
 
             # Create LLM instance using factory
             self.llm = LLMFactory.from_config(llm_config)
-            print("  LLM initialized")
+
+            print(f"  ✅ {llm_config.provider.upper()} LLM initialized for GENERATION ONLY")
+            print(f"  Model: {llm_config.model}")
+            print(f"  Usage: Final answer generation ONLY (NO intermediate processing)")
+
         except Exception as e:
             logger.error(f"Failed to initialize LLM: {e}")
             raise
 
-        print("\nSystem Ready!")
+        print("\n🚀 System Ready! LLM restricted to generation phase only.")
 
     def index_document(
         self, pdf_path: str, document_id: Optional[str] = None, save_to_disk: bool = True
@@ -305,28 +465,74 @@ class DeepLightRAG:
         print(f"Token Budget: {classification['max_tokens']}")
         print(f"Strategy: {classification['strategy']}")
 
-        # Retrieve context
+        # Retrieve context with visual awareness
         print("\n[Retrieving Context]...")
         retrieval_result = self.retriever.retrieve(question, override_level)
-        context = retrieval_result["context"]
 
-        print(f"Retrieved {retrieval_result['nodes_retrieved']} nodes")
-        print(f"Token count: ~{retrieval_result['token_count']}")
+        # Check if visual-aware retrieval was used
+        is_visual_retrieval = hasattr(retrieval_result, "visual_mode_used")
 
-        # Generate answer
-        print("\n[Generating Answer]...")
-        if enable_reasoning:
-            llm_result = self.llm.generate_with_reasoning(context, question)
-            answer = llm_result["answer"]
-            reasoning = llm_result.get("reasoning", "")
+        if is_visual_retrieval:
+            context = retrieval_result.context
+            visual_embeddings = retrieval_result.visual_context
+            visual_mode = retrieval_result.visual_mode_used
+
+            print(
+                f"Retrieved {retrieval_result.nodes_retrieved} nodes (Visual mode: {visual_mode})"
+            )
+            print(f"Token count: ~{retrieval_result.token_count}")
+            if visual_embeddings:
+                print(f"Visual embeddings: {len(visual_embeddings)}")
         else:
-            answer = self.llm.generate(context, question)
-            reasoning = ""
+            # Traditional retrieval result
+            context = retrieval_result["context"]
+            visual_embeddings = []
+            visual_mode = False
+
+            print(f"Retrieved {retrieval_result['nodes_retrieved']} nodes")
+            print(f"Token count: ~{retrieval_result['token_count']}")
+
+        # Generate answer with visual support
+        print("\n[Generating Answer]...")
+        if hasattr(self.llm, "generate_with_visual_context") and visual_embeddings:
+            # Use multimodal generation
+            if enable_reasoning:
+                llm_result = self.llm.generate_with_reasoning_and_visual(
+                    context, visual_embeddings, question
+                )
+                answer = llm_result["answer"]
+                reasoning = llm_result.get("reasoning", "")
+            else:
+                answer = self.llm.generate_with_visual_context(context, visual_embeddings, question)
+                reasoning = ""
+        else:
+            # Traditional generation
+            if enable_reasoning:
+                llm_result = self.llm.generate_with_reasoning(context, question)
+                answer = llm_result["answer"]
+                reasoning = llm_result.get("reasoning", "")
+            else:
+                answer = self.llm.generate(context, question)
+                reasoning = ""
 
         query_time = time.time() - start_time
 
         # Update stats
         self.stats["queries_processed"] += 1
+
+        # Handle both dictionary (from traditional retriever) and object (from visual retriever)
+        if hasattr(retrieval_result, "token_count"):
+            # VisualRetrievalResult object
+            tokens_used = retrieval_result.token_count
+            nodes_retrieved = retrieval_result.nodes_retrieved
+            entities_found = len(getattr(retrieval_result, "entities", []))
+            regions_accessed = len(getattr(retrieval_result, "regions", []))
+        else:
+            # Dictionary result
+            tokens_used = retrieval_result["token_count"]
+            nodes_retrieved = retrieval_result["nodes_retrieved"]
+            entities_found = len(retrieval_result.get("entities", []))
+            regions_accessed = len(retrieval_result.get("regions", []))
 
         result = {
             "question": question,
@@ -334,13 +540,13 @@ class DeepLightRAG:
             "reasoning": reasoning,
             "query_level": classification["level"],
             "strategy": classification["strategy"],
-            "tokens_used": retrieval_result["token_count"],
-            "tokens_vs_lightrag": f"{retrieval_result['token_count']} vs 30,000 (fixed)",
-            "token_savings": f"{((30000 - retrieval_result['token_count']) / 30000 * 100):.1f}%",
-            "nodes_retrieved": retrieval_result["nodes_retrieved"],
+            "tokens_used": tokens_used,
+            "tokens_vs_lightrag": f"{tokens_used} vs 30,000 (fixed)",
+            "token_savings": f"{((30000 - tokens_used) / 30000 * 100):.1f}%",
+            "nodes_retrieved": nodes_retrieved,
             "query_time": f"{query_time:.2f}s",
-            "entities_found": len(retrieval_result.get("entities", [])),
-            "regions_accessed": len(retrieval_result.get("regions", [])),
+            "entities_found": entities_found,
+            "regions_accessed": regions_accessed,
         }
 
         print("\n" + "-" * 60)

@@ -91,12 +91,28 @@ class EntityRelationshipGraph:
     - Multi-hop reasoning support
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        device: str = "cpu",
+        ner_config: Optional[Dict] = None,
+        re_config: Optional[Dict] = None,
+        llm=None,
+    ):
         self.graph = nx.DiGraph()
         self.entities: Dict[str, Entity] = {}
         self.relationships: List[Relationship] = []
         self.entity_name_index: Dict[str, str] = {}  # Name -> Entity ID
         self.entity_type_index: Dict[str, List[str]] = defaultdict(list)  # Type -> Entity IDs
+
+        # Store configuration for NER and RE components
+        self.device = device
+        self.ner_config = ner_config or {}
+        self.re_config = re_config or {}
+        self.llm = llm
+
+        # Initialize NER and RE components when needed
+        self.ner_pipeline = None
+        self.relation_pipeline = None
 
     def extract_entities_from_ocr(self, ocr_results: List[PageOCRResult]) -> int:
         """
@@ -172,32 +188,71 @@ class EntityRelationshipGraph:
 
     def _extract_entities_from_region(self, region: VisualRegion) -> List[Entity]:
         """
-        Extract entities from a visual region using multiple strategies.
+        Extract entities from a visual region using GLiNER-enhanced NER pipeline.
 
-        Strategies:
-        1. Pattern-based extraction (dates, money, percentages)
-        2. Named entity recognition (organizations, products)
-        3. Technical term extraction (concepts, metrics)
-        4. Key phrase extraction (important terms)
+        NEW: Uses GLiNER for zero-shot entity extraction with custom entity types
+        Fallback: Pattern-based extraction for compatibility
         """
         entities = []
         text = region.text_content
 
-        # Strategy 1: Pattern-based extraction
+        # NEW: Try GLiNER-based extraction first
+        try:
+            from ..ner.entity_processor import EntityProcessor
+
+            if not hasattr(self, "_entity_processor"):
+                print(f"    Initializing GLiNER entity processor on {self.device}...")
+
+                # Pass GPU configuration to EntityProcessor
+                processor_kwargs = {
+                    "confidence_threshold": self.ner_config.get("gliner", {}).get(
+                        "confidence_threshold", 0.3
+                    ),
+                    "enable_visual_grounding": True,
+                }
+
+                # Add GPU parameters if available
+                if self.device != "cpu":
+                    processor_kwargs["device"] = self.device
+
+                self._entity_processor = EntityProcessor(**processor_kwargs)
+
+            # Extract using GLiNER
+            result = self._entity_processor.process_text(
+                text=text, text_id=region.region_id, region_type=region.block_type
+            )
+
+            # Convert GLiNER entities to our format
+            gliner_entities = result.get("entities", [])
+            for gliner_entity in gliner_entities:
+                # Update with region-specific information
+                gliner_entity.source_regions = [region.region_id]
+                gliner_entity.grounding_boxes = [region.bbox.to_list()]
+                gliner_entity.block_type_context = [region.block_type]
+                gliner_entity.page_numbers = [region.page_num]
+                entities.append(gliner_entity)
+
+            if len(entities) > 0:
+                print(f"    ✅ GLiNER extracted {len(entities)} entities from {region.block_type}")
+                return entities
+            else:
+                print(f"    ⚠️ GLiNER found no entities, trying fallback methods...")
+
+        except Exception as e:
+            print(f"    ❌ GLiNER extraction failed: {e}")
+            print(f"    🔄 Falling back to pattern-based extraction...")
+
+        # FALLBACK: Original pattern-based extraction
         entities.extend(self._extract_monetary_entities(text, region))
         entities.extend(self._extract_date_entities(text, region))
         entities.extend(self._extract_percentage_entities(text, region))
         entities.extend(self._extract_numeric_metrics(text, region))
-
-        # Strategy 2: Named entity extraction
         entities.extend(self._extract_organizations(text, region))
         entities.extend(self._extract_technical_terms(text, region))
-
-        # Strategy 3: Key concept extraction
         entities.extend(self._extract_key_concepts(text, region))
-
-        # Strategy 4: Action/process extraction
         entities.extend(self._extract_processes(text, region))
+
+        print(f"    📊 Pattern-based extraction found {len(entities)} entities")
 
         return entities
 

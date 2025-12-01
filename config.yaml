@@ -1,13 +1,18 @@
-# Visual-Graph RAG Configuration
+# Visual-Graph RAG Configuration with Visual Embeddings
 project:
   name: "DeepLightRAG"
-  version: "1.0.0"
+  version: "2.0.0"
 
-# DeepSeek-OCR Settings
+# Vision-OCR Settings with Visual Embedding Support
 ocr:
-  model_name: "deepseek-ocr"  #
+  model_name: "mlx-community/DeepSeek-OCR-4bit"
   quantization: "4bit"  
-  resolution: "base"  
+  resolution: "base"
+  
+  # NEW: Visual Embedding Configuration
+  enable_visual_embeddings: true
+  embedding_compression: "pca"      # pca, quantize, sparse, none
+  target_embedding_dim: 256         # Compressed from 768 dimensions  
   resolution_configs:
     tiny:
       size: [512, 512]
@@ -24,13 +29,37 @@ ocr:
   batch_size: 2  # Pages per batch
   max_pages_parallel: 4
 
-# LLM Settings (DeepSeek R1)
+# LLM Settings (Gemini API) - ONLY for generation phase
 llm:
-  model_name: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-  quantization: "4bit"
-  max_tokens: 2048
+  provider: "gemini"
+  model: "gemini-2.0-flash-exp" 
+  api_key: "AIzaSyB4tnFzoHhEK2a8cg1iPW1aSqoEyMa0uNY"
+  max_tokens: 8192
   temperature: 0.7
   top_p: 0.9
+  top_k: 40
+  
+# NER Settings - Using DeBERTa/BERT (NO LLM)
+ner:
+  primary_model: "gliner"  # gliner, spacy, transformers
+  gliner:
+    model_name: "urchade/gliner_large-v2.1"
+    confidence_threshold: 0.4
+    batch_size: 8
+  enhanced_pipeline:
+    enable_visual_grounding: true
+    enable_cross_region_coreference: true
+    confidence_threshold: 0.3
+
+# Relation Extraction Settings - Using DeBERTa (NO LLM)  
+relation_extraction:
+  primary_model: "deberta"  # deberta, opennre, patterns
+  deberta:
+    model_name: "microsoft/deberta-v3-large"
+    confidence_threshold: 0.5
+    max_length: 512
+    device: "auto"
+  datasets: ["ACE05", "TACRED"]  # Training datasets for relation types
 
 # Graph Construction
 graph:

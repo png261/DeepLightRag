@@ -11,8 +11,7 @@ import numpy as np
 import json
 from pathlib import Path
 
-if TYPE_CHECKING:
-    from ..llm.base import BaseLLM
+
 
 try:
     import opennre
@@ -190,7 +189,6 @@ class OpenNREExtractor:
         confidence_threshold: float = 0.3,
         max_distance: int = 200,  # Max character distance between entities
         device: str = "cpu",
-        llm: Optional["BaseLLM"] = None,
     ):
         """
         Initialize OpenNRE extractor
@@ -205,7 +203,6 @@ class OpenNREExtractor:
         self.confidence_threshold = confidence_threshold
         self.max_distance = max_distance
         self.device = device
-        self.llm = llm
 
         # Initialize relation schema
         self.schema = DeepLightRAGRelationSchema()
@@ -709,12 +706,10 @@ class RelationExtractionPipeline:
         opennre_extractor: Optional[OpenNREExtractor] = None,
         enable_visual_relations: bool = True,
         enable_cross_region_relations: bool = True,
-        llm: Optional["BaseLLM"] = None,
     ):
-        self.extractor = opennre_extractor or OpenNREExtractor(llm=llm)
+        self.extractor = opennre_extractor or OpenNREExtractor()
         self.enable_visual_relations = enable_visual_relations
         self.enable_cross_region_relations = enable_cross_region_relations
-        self.llm = llm
 
     def process_entities_for_relations(
         self,

@@ -11,7 +11,6 @@ from collections import defaultdict
 from .gliner_ner import GLiNERExtractor, ExtractedEntity
 from ..ocr.deepseek_ocr import VisualRegion
 from ..graph.entity_relationship import Entity, Relationship
-from ..llm.base import BaseLLM
 
 
 @dataclass
@@ -51,7 +50,6 @@ class EnhancedNERPipeline:
         enable_visual_grounding: bool = True,
         enable_cross_region_coreference: bool = True,
         confidence_threshold: float = 0.3,
-        llm: Optional[BaseLLM] = None,
     ):
         """
         Initialize Enhanced NER Pipeline
@@ -66,7 +64,6 @@ class EnhancedNERPipeline:
         self.enable_visual_grounding = enable_visual_grounding
         self.enable_cross_region_coreference = enable_cross_region_coreference
         self.confidence_threshold = confidence_threshold
-        self.llm = llm
 
         # Processing statistics
         self.processing_stats = {
@@ -470,23 +467,7 @@ class EnhancedNERPipeline:
             print(f"    ❌ OpenNRE extraction failed: {e}")
             print(f"    🔄 Falling back to LLM extraction...")
 
-        # FALLBACK 2: Try LLM-based relation extraction
-        if self.llm is not None and len(relationships) == 0:
-            try:
-                print("    🧠 Initializing LLM-based relation extraction...")
-                llm_relationships = self._extract_relationships_with_llm(entities, regions)
-
-                if len(llm_relationships) > 0:
-                    print(f"    ✅ LLM extracted {len(llm_relationships)} relationships")
-                    return llm_relationships
-                else:
-                    print(f"    ⚠️ LLM found no relationships, trying pattern fallback...")
-
-            except Exception as e:
-                print(f"    ❌ LLM extraction failed: {e}")
-                print(f"    🔄 Falling back to pattern extraction...")
-
-        # FALLBACK 3: Original co-occurrence relationships
+        # FALLBACK 2: Original co-occurrence relationships
         entities_by_region = defaultdict(list)
         for entity in entities:
             region_id = entity.metadata.get("region_id", "unknown")
@@ -548,132 +529,6 @@ class EnhancedNERPipeline:
         )
 
         return relationship
-
-    def _extract_relationships_with_llm(
-        self, entities: List[ExtractedEntity], regions: List[VisualRegion]
-    ) -> List[Relationship]:
-        """
-        Extract relationships using LLM as fallback when NRE and RE models fail
-
-        Args:
-            entities: List of extracted entities
-            regions: List of visual regions
-
-        Returns:
-            List of relationships extracted by LLM
-        """
-        relationships = []
-
-        # Group entities by region for context-aware extraction
-        entities_by_region = defaultdict(list)
-        for entity in entities:
-            region_id = entity.metadata.get("region_id", "unknown")
-            entities_by_region[region_id].append(entity)
-
-        # Process each region with sufficient entities
-        for region_id, region_entities in entities_by_region.items():
-            if len(region_entities) < 2:
-                continue
-
-            # Find corresponding region
-            region = next((r for r in regions if r.region_id == region_id), None)
-            if not region:
-                continue
-
-            # Prepare entities for LLM prompt
-            entity_list = []
-            for entity in region_entities:
-                entity_list.append(f"- {entity.text} ({entity.label})")
-
-            # Create LLM prompt for relationship extraction
-            prompt = f"""
-Analyze the following text and entities to identify meaningful relationships between them.
-
-Text: "{region.text_content[:1000]}..."
-
-Entities:
-{chr(10).join(entity_list)}
-
-Task: Identify relationships between these entities. For each relationship found, provide:
-1. Source entity
-2. Target entity  
-3. Relationship type (choose from: RELATED_TO, PART_OF, INFLUENCES, COMPARED_TO, MENTIONS, CONTAINS, DEPENDS_ON)
-4. Brief description
-
-Format your response as JSON:
-{{
-  "relationships": [
-    {{
-      "source": "entity_text", 
-      "target": "entity_text",
-      "type": "RELATIONSHIP_TYPE",
-      "description": "brief description"
-    }}
-  ]
-}}
-
-Only include relationships that are explicitly mentioned or strongly implied in the text.
-"""
-
-            try:
-                # Call LLM
-                response = self.llm.generate(prompt, temperature=0.3, max_tokens=1024)
-
-                # Parse LLM response
-                import json
-
-                try:
-                    result = json.loads(response.strip())
-                    llm_relations = result.get("relationships", [])
-
-                    # Convert LLM relationships to DeepLightRAG format
-                    for rel in llm_relations:
-                        source_text = rel.get("source", "").strip()
-                        target_text = rel.get("target", "").strip()
-                        rel_type = rel.get("type", "RELATED_TO")
-                        description = rel.get("description", "")
-
-                        # Find matching entities
-                        source_entity = None
-                        target_entity = None
-
-                        for entity in region_entities:
-                            if entity.text.lower() == source_text.lower():
-                                source_entity = entity
-                            elif entity.text.lower() == target_text.lower():
-                                target_entity = entity
-
-                        # Create relationship if both entities found
-                        if source_entity and target_entity:
-                            relationship = Relationship(
-                                source_entity=f"entity_{source_entity.text}_{source_entity.label}",
-                                target_entity=f"entity_{target_entity.text}_{target_entity.label}",
-                                relationship_type=rel_type.lower(),
-                                description=description
-                                or f"{source_entity.text} {rel_type.lower()} {target_entity.text}",
-                                weight=0.7,  # Medium confidence for LLM extraction
-                                spatial_cooccurrence=False,
-                                layout_aware_type=f"llm_extracted_{region.block_type}",
-                                source_regions=[region.region_id],
-                                evidence_text=region.text_content[:500],
-                                metadata={
-                                    "extraction_method": "llm_fallback",
-                                    "region_type": region.block_type,
-                                    "page_num": region.page_num,
-                                    "llm_confidence": "medium",
-                                },
-                            )
-                            relationships.append(relationship)
-
-                except json.JSONDecodeError:
-                    print(f"    ⚠️ LLM returned invalid JSON for region {region_id}")
-                    continue
-
-            except Exception as e:
-                print(f"    ❌ LLM processing failed for region {region_id}: {e}")
-                continue
-
-        return relationships
 
     def get_processing_stats(self) -> Dict[str, Any]:
         """Get processing statistics"""

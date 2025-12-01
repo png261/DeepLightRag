@@ -12,7 +12,7 @@
 - **Adaptive Token Budgeting** (2K-12K tokens vs 30K fixed)
 - **Auto GPU Detection** - CUDA, MPS, or CPU
 - **60-80% Cost Savings** compared to traditional RAG
-- **LLM Fallback** for robust entity/relation extraction
+- **No LLM Required** - Pure indexing & retrieval with GLiNER + OpenNRE
 - **Cross-Platform** - Windows, Linux, macOS
 
 ## 📦 Installation

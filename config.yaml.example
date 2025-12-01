@@ -29,15 +29,16 @@ ocr:
   batch_size: 2  # Pages per batch
   max_pages_parallel: 4
 
-# LLM Settings (Gemini API) - ONLY for generation phase
+# LLM Settings - Users provide their own LLM (not used by this package)
+# This package only does indexing and retrieval
+# You integrate your own LLM for generation
 llm:
-  provider: "gemini"
-  model: "gemini-2.0-flash-exp" 
-  api_key: "AIzaSyB4tnFzoHhEK2a8cg1iPW1aSqoEyMa0uNY"
+  # Not used - remove this section or set your own values
+  provider: "your_provider"  # openai, anthropic, gemini, etc.
+  model: "your_model"
+  api_key: "YOUR_API_KEY_HERE"  # Use environment variables instead!
   max_tokens: 8192
   temperature: 0.7
-  top_p: 0.9
-  top_k: 40
   
 # NER Settings - Using DeBERTa/BERT (NO LLM)
 ner:

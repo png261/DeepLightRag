@@ -176,3 +176,9 @@ Thumbs.db
 # Local test files
 test_*.py
 *_test.py
+config.yaml
+
+# Environment files with secrets
+.env
+*.env
+config.yaml

@@ -68,40 +68,45 @@ def cmd_index(args, rag_system):
 
 
 def cmd_query(args, rag_system):
-    """Query the indexed document"""
+    """Retrieve context for a query"""
     if args.load_doc:
         rag_system.load_document(args.load_doc)
 
-    result = rag_system.query(
-        args.question, enable_reasoning=args.reasoning, override_level=args.level
-    )
+    result = rag_system.retrieve(args.question, override_level=args.level)
 
-    print(f"\nAnswer: {result.get('answer', 'No answer')}")
-    print(f"Query Level: {result.get('query_level', 'N/A')}")
-    print(f"Tokens Used: {result.get('tokens_used', 'N/A')}")
-    print(f"Processing Time: {result.get('query_time', 'N/A')}")
+    print(f"\n{'='*60}")
+    print("RETRIEVED CONTEXT")
+    print(f"{'='*60}")
+    print(f"\n{result.get('context', 'No context')}\n")
+    print(f"{'='*60}")
+    print(f"Query Level: {result.get('level_name', 'N/A')} (Level {result.get('query_level', 'N/A')})")
+    print(f"Tokens Used: {result.get('tokens_used', 'N/A')}/{result.get('token_budget', 'N/A')}")
+    print(f"Entities Found: {result.get('entities_found', 'N/A')}")
+    print(f"Nodes Retrieved: {result.get('nodes_retrieved', 'N/A')}")
+    print(f"Retrieval Time: {result.get('retrieval_time', 'N/A')}")
+    print(f"\n💡 Use this context with your own LLM for generation!")
 
     if args.output:
         with open(args.output, "w") as f:
-            json.dump(result, f, indent=2)
+            json.dump(result, f, indent=2, default=str)
         print(f"\nResults saved to {args.output}")
 
     return result
 
 
 def cmd_interactive(args, rag_system):
-    """Interactive query mode"""
+    """Interactive retrieval mode"""
     if args.load_doc:
         rag_system.load_document(args.load_doc)
 
     print("\n" + "=" * 60)
-    print("DeepLightRAG Interactive Mode")
+    print("DeepLightRAG Interactive Retrieval Mode")
     print("=" * 60)
     print("Type your questions (or 'quit' to exit)")
-    print("Commands: !stats, !reasoning on/off, !level N")
+    print("Commands: !stats, !level N")
+    print("💡 Context retrieved - use with your own LLM for generation")
     print()
 
-    enable_reasoning = False
     override_level = None
 
     while True:
@@ -120,12 +125,6 @@ def cmd_interactive(args, rag_system):
                 if question == "!stats":
                     stats = rag_system.get_statistics()
                     print(json.dumps(stats, indent=2, default=str))
-                elif question == "!reasoning on":
-                    enable_reasoning = True
-                    print("Chain-of-thought reasoning enabled")
-                elif question == "!reasoning off":
-                    enable_reasoning = False
-                    print("Chain-of-thought reasoning disabled")
                 elif question.startswith("!level"):
                     parts = question.split()
                     if len(parts) == 2:
@@ -138,14 +137,18 @@ def cmd_interactive(args, rag_system):
                     print("Unknown command")
                 continue
 
-            # Regular query
-            result = rag_system.query(
-                question, enable_reasoning=enable_reasoning, override_level=override_level
-            )
+            # Regular retrieval
+            result = rag_system.retrieve(question, override_level=override_level)
 
-            print(f"\nAnswer: {result.get('answer', 'No answer')}")
+            print(f"\n{'='*60}")
+            print("CONTEXT")
+            print(f"{'='*60}")
+            print(f"{result.get('context', 'No context')[:500]}...")
+            print(f"{'='*60}")
             print(
-                f"Level: {result.get('query_level', 'N/A')} | Tokens: {result.get('tokens_used', 'N/A')}"
+                f"Level: {result.get('level_name', 'N/A')} ({result.get('query_level', 'N/A')}) | "
+                f"Tokens: {result.get('tokens_used', 'N/A')}/{result.get('token_budget', 'N/A')} | "
+                f"Entities: {result.get('entities_found', 'N/A')}"
             )
 
         except KeyboardInterrupt:
@@ -174,15 +177,14 @@ def main():
     index_parser.add_argument("--output", help="Save results to JSON file")
 
     # Query command
-    query_parser = subparsers.add_parser("query", help="Query the indexed document")
+    query_parser = subparsers.add_parser("query", help="Retrieve context for a query")
     query_parser.add_argument("question", help="Question to ask")
     query_parser.add_argument("--load-doc", help="Load specific document")
-    query_parser.add_argument("--reasoning", action="store_true", help="Enable reasoning")
-    query_parser.add_argument("--level", type=int, help="Override query level (1-4)")
+    query_parser.add_argument("--level", type=int, help="Override query level (1-5)")
     query_parser.add_argument("--output", help="Save results to JSON file")
 
     # Interactive command
-    interactive_parser = subparsers.add_parser("interactive", help="Interactive query mode")
+    interactive_parser = subparsers.add_parser("interactive", help="Interactive retrieval mode")
     interactive_parser.add_argument("--load-doc", help="Load specific document")
 
     args = parser.parse_args()

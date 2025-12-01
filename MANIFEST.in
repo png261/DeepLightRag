@@ -1,0 +1,18 @@
+# Include documentation
+include README.md
+include LICENSE
+include CHANGELOG.md
+
+# Include configuration files
+include pyproject.toml
+include requirements.txt
+include requirements-macos.txt
+
+# Include documentation
+recursive-include docs *.md *.rst *.txt
+
+# Exclude unnecessary files
+global-exclude *.py[cod] __pycache__ *.so *.dylib .DS_Store
+prune test*
+prune example*
+prune .git*

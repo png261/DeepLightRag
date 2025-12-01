@@ -9,15 +9,21 @@ from typing import List, Tuple, Optional, Dict, Any
 from PIL import Image
 import tempfile
 import os
+import platform
 
-try:
-    import mlx.core as mx
-    import mlx.nn as nn
-    from mlx_vlm import load, generate
-    from mlx_vlm.prompt_utils import apply_chat_template
+# MLX is only available on macOS
+IS_MACOS = platform.system() == "Darwin"
 
-    HAS_MLX = True
-except ImportError:
+if IS_MACOS:
+    try:
+        import mlx.core as mx
+        import mlx.nn as nn
+        from mlx_vlm import load, generate
+        from mlx_vlm.prompt_utils import apply_chat_template
+        HAS_MLX = True
+    except ImportError:
+        HAS_MLX = False
+else:
     HAS_MLX = False
 
 

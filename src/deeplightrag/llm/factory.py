@@ -85,10 +85,8 @@ def _register_builtin_providers():
 
     # Core providers
     from .anthropic_provider import AnthropicLLM
-    from .deepseek_provider import DeepSeekLLM
     from .openai_provider import OpenAILLM
 
-    LLMFactory.register_provider("deepseek", DeepSeekLLM)
     LLMFactory.register_provider("openai", OpenAILLM)
     LLMFactory.register_provider("anthropic", AnthropicLLM)
 

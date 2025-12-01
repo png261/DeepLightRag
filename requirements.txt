@@ -1,11 +1,15 @@
 # Visual-Graph RAG Dependencies
 # Core ML/AI
-mlx>=0.21.0
-mlx-lm>=0.19.0
 transformers>=4.40.0
 torch>=2.0.0
 torchvision>=0.15.0
 pillow>=10.0.0
+accelerate>=0.24.0  # For GPU optimization
+
+# MLX (macOS only - install manually on Mac: pip install mlx mlx-lm mlx-vlm)
+# mlx>=0.21.0
+# mlx-lm>=0.19.0
+# mlx-vlm>=0.0.12
 
 # PDF Processing
 pdf2image>=1.16.0
@@ -19,13 +23,11 @@ numpy>=1.24.0
 faiss-cpu>=1.7.4
 sentence-transformers>=2.2.0
 
-# LLM Integration
-openai>=1.0.0
-google-generativeai>=0.8.0
+# Optional: LLM providers (if you want to use them for generation)
+# openai>=1.0.0
+# google-generativeai>=0.8.0
+# anthropic>=0.7.0
 httpx>=0.25.0
-
-# LightRAG (for comparison)
-lightrag-hku>=0.1.0
 
 # Utilities
 tqdm>=4.65.0
@@ -42,18 +44,11 @@ pandas>=2.0.0
 # Optional: For better OCR fallback
 easyocr>=1.7.0
 
-# NEW: Advanced NER with GLiNER
-gliner>=0.2.0
+# Advanced NER with GLiNER
+gliner>=0.1.12
 
-# NEW: Advanced Relation Extraction with OpenNRE
+# Advanced Relation Extraction with OpenNRE
 opennre>=1.1.0
 
-# NEW: MLX Vision-Language Model
-mlx-vlm>=0.0.12
-
-# NEW: State-of-the-art RE with DeBERTa/BERT (ACE05/TACRED)
-transformers>=4.30.0
-torch>=2.0.0
-
-# NEW: SciSpaCy for scientific text processing
-scispacy>=0.5.0
+# SciSpaCy for scientific text processing (optional)
+# scispacy>=0.5.0

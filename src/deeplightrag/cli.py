@@ -1,241 +1,168 @@
-#!/usr/bin/env python3
 """
 DeepLightRAG Command Line Interface
+Document Indexing and Retrieval (NO generation - use with your own LLM)
 """
 
-import argparse
-import json
 import sys
+import argparse
 from pathlib import Path
 
 
 def main():
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
-        description="DeepLightRAG: Efficient Document-based RAG",
+        description="DeepLightRAG: Document Indexing & Retrieval (use with any LLM)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Index a PDF document
-  deeplightrag index document.pdf --id my_doc
-
-  # Query an indexed document
-  deeplightrag query "What is the main idea?" --doc my_doc
-
-  # Interactive mode
-  deeplightrag interactive --doc my_doc
-
-  # Show system info
-  deeplightrag info
-        """,
     )
-
+    
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="DeepLightRAG 1.0.0"
+    )
+    
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
-
+    
     # Index command
-    index_parser = subparsers.add_parser("index", help="Index a PDF document")
-    index_parser.add_argument("pdf_path", help="Path to PDF file")
-    index_parser.add_argument("--id", dest="doc_id", help="Document ID (default: filename)")
-    index_parser.add_argument("--storage", default="./deeplightrag_data", help="Storage directory")
-
-    # Query command
-    query_parser = subparsers.add_parser("query", help="Query an indexed document")
-    query_parser.add_argument("question", help="Question to ask")
-    query_parser.add_argument("--doc", dest="doc_id", required=True, help="Document ID to query")
-    query_parser.add_argument("--storage", default="./deeplightrag_data", help="Storage directory")
-    query_parser.add_argument(
-        "--level", type=int, choices=[1, 2, 3, 4], help="Override query level"
-    )
-    query_parser.add_argument("--reasoning", action="store_true", help="Enable reasoning mode")
-
-    # Interactive command
-    interactive_parser = subparsers.add_parser("interactive", help="Interactive query mode")
-    interactive_parser.add_argument("--doc", dest="doc_id", required=True, help="Document ID")
-    interactive_parser.add_argument(
-        "--storage", default="./deeplightrag_data", help="Storage directory"
-    )
-
+    index_parser = subparsers.add_parser("index", help="Index a document")
+    index_parser.add_argument("pdf_path", type=str, help="Path to PDF file")
+    index_parser.add_argument("--output", "-o", type=str, default="./deeplightrag_data",
+                             help="Output directory for indexed data")
+    index_parser.add_argument("--doc-id", type=str, help="Document ID (default: filename)")
+    
+    # Retrieve command
+    retrieve_parser = subparsers.add_parser("retrieve", help="Retrieve context for a query")
+    retrieve_parser.add_argument("question", type=str, help="Question to retrieve context for")
+    retrieve_parser.add_argument("--storage", "-s", type=str, default="./deeplightrag_data",
+                             help="Storage directory with indexed data")
+    
     # Info command
     info_parser = subparsers.add_parser("info", help="Show system information")
-    info_parser.add_argument("--storage", default="./deeplightrag_data", help="Storage directory")
-
-    # List command
-    list_parser = subparsers.add_parser("list", help="List indexed documents")
-    list_parser.add_argument("--storage", default="./deeplightrag_data", help="Storage directory")
-
+    
     args = parser.parse_args()
-
-    if args.command is None:
-        parser.print_help()
-        sys.exit(1)
-
+    
     if args.command == "index":
-        cmd_index(args)
-    elif args.command == "query":
-        cmd_query(args)
-    elif args.command == "interactive":
-        cmd_interactive(args)
+        index_document(args)
+    elif args.command == "retrieve":
+        retrieve_context(args)
     elif args.command == "info":
-        cmd_info(args)
-    elif args.command == "list":
-        cmd_list(args)
+        show_info()
     else:
         parser.print_help()
         sys.exit(1)
 
 
-def cmd_index(args):
-    """Index a PDF document"""
-    from . import DeepLightRAG
-
-    print("Initializing DeepLightRAG...")
-    rag = DeepLightRAG(storage_dir=args.storage)
-
-    doc_id = args.doc_id or Path(args.pdf_path).stem
-    print(f"\nIndexing {args.pdf_path} as '{doc_id}'...")
-
-    result = rag.index_document(args.pdf_path, doc_id)
-
-    print("\n" + "=" * 60)
-    print("INDEXING SUMMARY")
-    print("=" * 60)
-    print(f"Document ID: {result['document_id']}")
-    print(f"Pages: {result['num_pages']}")
-    print(f"Compression: {result['compression_ratio_str']}")
-    print(f"Tokens Saved: {result['tokens_saved']:,}")
-    print(f"Time: {result['indexing_time_str']}")
-    print(
-        f"Graph Nodes: {result['graph_stats']['visual_nodes']} visual, {result['graph_stats']['entity_nodes']} entities"
-    )
-
-
-def cmd_query(args):
-    """Query an indexed document"""
-    from . import DeepLightRAG
-
-    print("Initializing DeepLightRAG...")
-    rag = DeepLightRAG(storage_dir=args.storage)
-
-    print(f"Loading document: {args.doc_id}")
-    rag.load_document(args.doc_id)
-
-    result = rag.query(args.question, enable_reasoning=args.reasoning, override_level=args.level)
-
-    print("\n" + "=" * 60)
-    print("ANSWER")
-    print("=" * 60)
-    print(result["answer"])
-    print("\n" + "-" * 60)
-    print(f"Query Level: {result['query_level']}")
-    print(f"Tokens Used: {result['tokens_used']}")
-    print(f"Token Savings: {result['token_savings']}")
+def index_document(args):
+    """Index a document"""
+    try:
+        from .core import DeepLightRAG
+        
+        pdf_path = Path(args.pdf_path)
+        if not pdf_path.exists():
+            print(f"Error: File not found: {pdf_path}")
+            sys.exit(1)
+        
+        doc_id = args.doc_id or pdf_path.stem
+        
+        print(f"Indexing document: {pdf_path.name}")
+        print(f"Output directory: {args.output}")
+        print(f"Document ID: {doc_id}\n")
+        
+        rag = DeepLightRAG(storage_dir=args.output)
+        results = rag.index_document(str(pdf_path), document_id=doc_id, save_to_disk=True)
+        
+        print(f"\n✅ Indexing complete!")
+        print(f"Time: {results.get('indexing_time_str')}")
+        print(f"Pages: {results.get('total_pages')}")
+        print(f"Entities: {results['graph_stats'].get('entity_nodes')}")
+        print(f"Relationships: {results['graph_stats'].get('relationships')}")
+        print(f"Tokens saved: {results.get('tokens_saved'):,}")
+        
+    except Exception as e:
+        print(f"Error indexing document: {e}")
+        sys.exit(1)
 
 
-def cmd_interactive(args):
-    """Interactive query mode"""
-    from . import DeepLightRAG
-
-    print("Initializing DeepLightRAG...")
-    rag = DeepLightRAG(storage_dir=args.storage)
-
-    print(f"Loading document: {args.doc_id}")
-    rag.load_document(args.doc_id)
-
-    print("\n" + "=" * 60)
-    print("INTERACTIVE MODE")
-    print("=" * 60)
-    print("Type your questions below. Type 'quit' or 'exit' to stop.")
-    print("Type 'stats' to see query statistics.")
-    print("-" * 60)
-
-    while True:
-        try:
-            question = input("\nQuestion: ").strip()
-
-            if not question:
-                continue
-
-            if question.lower() in ["quit", "exit", "q"]:
-                print("Goodbye!")
-                break
-
-            if question.lower() == "stats":
-                stats = rag.get_statistics()
-                print(json.dumps(stats["system_stats"], indent=2))
-                continue
-
-            result = rag.query(question)
-            print(f"\nAnswer: {result['answer']}")
-            print(
-                f"\n[Level {result['query_level']}, {result['tokens_used']} tokens, {result['token_savings']} saved]"
-            )
-
-        except KeyboardInterrupt:
-            print("\nGoodbye!")
-            break
-        except Exception as e:
-            print(f"Error: {e}")
+def retrieve_context(args):
+    """Retrieve context for a query (NO generation)"""
+    try:
+        from .core import DeepLightRAG
+        
+        storage_path = Path(args.storage)
+        if not storage_path.exists():
+            print(f"Error: Storage directory not found: {storage_path}")
+            print("Index a document first with: deeplightrag index <pdf_path>")
+            sys.exit(1)
+        
+        print(f"Question: {args.question}\n")
+        
+        rag = DeepLightRAG(storage_dir=args.storage)
+        result = rag.retrieve(args.question)
+        
+        print(f"\n📄 Retrieved Context:")
+        print("-" * 50)
+        print(result['context'])
+        print("-" * 50)
+        print(f"\nRetrieval Stats:")
+        print(f"  • Level: {result['level_name']}")
+        print(f"  • Tokens used: {result['tokens_used']} / {result['token_budget']}")
+        print(f"  • Entities found: {result['entities_found']}")
+        print(f"  • Visual regions: {result['regions_accessed']}")
+        print(f"  • Time: {result['retrieval_time']}")
+        print(f"\n💡 Use this context with YOUR LLM for generation!")
+        
+    except Exception as e:
+        print(f"Error retrieving context: {e}")
+        sys.exit(1)
 
 
-def cmd_info(args):
+def show_info():
     """Show system information"""
-    from . import DeepLightRAG, __version__
-
-    print("=" * 60)
-    print("VISUAL-GRAPH RAG SYSTEM INFO")
-    print("=" * 60)
-    print(f"Version: {__version__}")
-    print(f"Storage Directory: {args.storage}")
-
-    storage = Path(args.storage)
-    if storage.exists():
-        docs = [
-            d.name for d in storage.iterdir() if d.is_dir() and (d / "cross_layer.json").exists()
-        ]
-        print(f"Indexed Documents: {len(docs)}")
-        for doc in docs:
-            print(f"  - {doc}")
-    else:
-        print("Storage directory not found.")
-
-    print("\nFeatures:")
-    print("  - 9-10x Vision-Text Compression")
-    print("  - Dual-Layer Graph Architecture")
-    print("  - Adaptive Token Budgeting (2K-12K)")
-    print("  - 60-80% Cost Savings vs LightRAG")
-
-
-def cmd_list(args):
-    """List indexed documents"""
-    storage = Path(args.storage)
-
-    if not storage.exists():
-        print("No indexed documents found.")
-        return
-
-    docs = []
-    for doc_dir in storage.iterdir():
-        if doc_dir.is_dir() and (doc_dir / "cross_layer.json").exists():
-            # Get stats
-            try:
-                with open(doc_dir / "cross_layer.json") as f:
-                    data = json.load(f)
-                entity_count = len(data.get("entity_to_regions", {}))
-                region_count = len(data.get("region_to_entities", {}))
-                docs.append({"id": doc_dir.name, "entities": entity_count, "regions": region_count})
-            except:
-                docs.append({"id": doc_dir.name, "entities": "?", "regions": "?"})
-
-    if not docs:
-        print("No indexed documents found.")
-        return
-
-    print("=" * 60)
-    print("INDEXED DOCUMENTS")
-    print("=" * 60)
-    for doc in docs:
-        print(f"  {doc['id']}")
-        print(f"    Entities: {doc['entities']}, Regions: {doc['regions']}")
+    import platform
+    
+    print("DeepLightRAG System Information")
+    print("=" * 50)
+    print(f"Version: 1.0.0")
+    print(f"Platform: {platform.system()} {platform.release()}")
+    print(f"Python: {platform.python_version()}")
+    
+    # Check GPU availability
+    try:
+        import torch
+        gpu_available = torch.cuda.is_available()
+        print(f"\nGPU (CUDA): {'✅ Available' if gpu_available else '❌ Not available'}")
+        if gpu_available:
+            print(f"  Device: {torch.cuda.get_device_name(0)}")
+            print(f"  Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB")
+    except ImportError:
+        print(f"\nGPU (CUDA): ⚠️ PyTorch not installed")
+    
+    # Check MLX availability (macOS)
+    is_macos = platform.system() == "Darwin"
+    if is_macos:
+        try:
+            import mlx.core as mx
+            print(f"MLX (macOS): ✅ Available")
+        except ImportError:
+            print(f"MLX (macOS): ❌ Not installed (optional)")
+            print(f"  Install with: pip install mlx mlx-lm mlx-vlm")
+    
+    # Check dependencies
+    print("\nCore Dependencies:")
+    deps = [
+        ("transformers", "Transformers"),
+        ("gliner", "GLiNER"),
+        ("sentence_transformers", "Sentence Transformers"),
+        ("PIL", "Pillow"),
+        ("fitz", "PyMuPDF"),
+    ]
+    
+    for module, name in deps:
+        try:
+            __import__(module)
+            print(f"  ✅ {name}")
+        except ImportError:
+            print(f"  ❌ {name}")
 
 
 if __name__ == "__main__":

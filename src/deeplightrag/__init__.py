@@ -1,11 +1,20 @@
 """
-DeepLightRAG: Efficient Document-based RAG with Vision-Text Compression
+DeepLightRAG: Document Indexing and Retrieval System
 
-A production-ready RAG system featuring:
+Focus: High-performance indexing and retrieval (NO generation included)
+
+Features:
 - 9-10x Vision-Text Compression using DeepSeek-OCR
-- Dual-Layer Graph Architecture (Visual-Spatial + Entity-Relationship)
+- Dual-Layer Graph Architecture (Visual-Spatial + Entity-Relationship)  
 - Adaptive Token Budgeting (2K-12K tokens vs 30K fixed)
-- 60-80% cost savings compared to traditional RAG systems
+- GPU acceleration (CUDA, MPS, CPU)
+- Use with ANY LLM of your choice for generation
+
+This package handles ONLY:
+1. Document indexing (PDF → Knowledge Graph)
+2. Context retrieval (Query → Relevant context)
+
+You provide your own LLM for generation.
 """
 
 __version__ = "1.0.0"
@@ -18,9 +27,6 @@ from .core import DeepLightRAG, GraphWrapper, RetrieverWrapper
 from .graph.dual_layer import DualLayerGraph
 from .graph.entity_relationship import Entity, EntityRelationshipGraph, Relationship
 from .graph.visual_spatial import SpatialEdge, VisualNode, VisualSpatialGraph
-
-# LLM components
-from .llm.deepseek_r1 import DeepSeekR1
 
 # OCR components
 from .ocr.deepseek_ocr import (
@@ -65,6 +71,4 @@ __all__ = [
     "QueryClassifier",
     "QueryLevel",
     "AdaptiveRetriever",
-    # LLM
-    "DeepSeekR1",
 ]

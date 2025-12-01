@@ -1,0 +1,11 @@
+# macOS-specific requirements for DeepLightRAG
+# Install base requirements first: pip install -r requirements.txt
+# Then install macOS-specific packages: pip install -r requirements-macos.txt
+
+# MLX Framework (Apple Silicon optimized)
+mlx>=0.21.0
+mlx-lm>=0.19.0
+mlx-vlm>=0.0.12
+
+# Note: MLX only works on macOS with Apple Silicon (M1/M2/M3)
+# On other platforms, the system will automatically use PyTorch/Transformers instead

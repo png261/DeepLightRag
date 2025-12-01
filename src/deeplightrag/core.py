@@ -1,6 +1,7 @@
 """
-DeepLightRAG: Main Pipeline Orchestrator
-Combines all components for end-to-end document QA
+DeepLightRAG: Document Indexing and Retrieval System
+Focus: High-performance indexing and retrieval (NO generation)
+Use with any LLM of your choice for generation
 """
 
 import json
@@ -11,8 +12,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .graph.dual_layer import DualLayerGraph
-from .llm.base import LLMConfig
-from .llm.factory import LLMFactory
 from .ocr.deepseek_ocr import DeepSeekOCR
 from .ocr.processor import PDFProcessor
 from .retrieval.adaptive_retriever import AdaptiveRetriever
@@ -32,14 +31,14 @@ class DeepLightRAG:
         self._setup_gpu_optimization()
 
         print("=" * 60)
-        print("  DeepLightRAG System")
-        print("  Efficient Document-based RAG with Vision-Text Compression")
+        print("  DeepLightRAG: Indexing & Retrieval System")
+        print("  High-performance indexing with vision-text compression")
+        print("  Use with ANY LLM for generation")
         if hasattr(self, "device") and self.device == "cuda":
             print(f"  🎮 GPU Acceleration: {self.gpu_name}")
         print("=" * 60)
 
         self._init_ocr()
-        self._init_llm()
         self._init_graph()
         self._init_retriever()
 
@@ -87,7 +86,10 @@ class DeepLightRAG:
     def _default_config(self) -> Dict:
         """Default configuration with auto GPU detection"""
         import torch
+        import platform
 
+        is_macos = platform.system() == "Darwin"
+        
         # Auto-detect optimal model based on hardware
         if torch.cuda.is_available():
             # GPU configuration - better models
@@ -132,16 +134,29 @@ class DeepLightRAG:
                 },
             }
         else:
-            # CPU configuration - lighter models
-            ocr_config = {
-                "model_name": "mlx-community/DeepSeek-OCR-4bit",
-                "quantization": "4bit",
-                "resolution": "base",
-                "device": "cpu",
-                "enable_visual_embeddings": True,
-                "embedding_compression": "pca",
-                "target_embedding_dim": 256,
-            }
+            # CPU configuration - use MLX on macOS, transformers elsewhere
+            if is_macos:
+                # macOS: Use MLX 4-bit quantized model
+                ocr_config = {
+                    "model_name": "mlx-community/DeepSeek-OCR-4bit",
+                    "quantization": "4bit",
+                    "resolution": "base",
+                    "device": "cpu",
+                    "enable_visual_embeddings": True,
+                    "embedding_compression": "pca",
+                    "target_embedding_dim": 256,
+                }
+            else:
+                # Other platforms: Use transformers CPU mode
+                ocr_config = {
+                    "model_name": "deepseek-ai/deepseek-ocr",
+                    "quantization": "8bit",  # CPU-friendly quantization
+                    "resolution": "base",
+                    "device": "cpu",
+                    "enable_visual_embeddings": True,
+                    "embedding_compression": "pca",
+                    "target_embedding_dim": 256,
+                }
             ner_config = {
                 "primary_model": "gliner",
                 "device": "cpu",
@@ -163,20 +178,6 @@ class DeepLightRAG:
 
         return {
             "ocr": ocr_config,
-            "llm": {
-                "provider": "gemini",  # ONLY for final generation
-                "model": "gemini-2.0-flash-exp",
-                "api_key": os.environ.get(
-                    "GEMINI_API_KEY", "AIzaSyB4tnFzoHhEK2a8cg1iPW1aSqoEyMa0uNY"
-                ),
-                "temperature": 0.7,
-                "max_tokens": 8192,
-                "top_p": 0.9,
-                "top_k": 40,
-                "timeout": 30,
-                "retry_attempts": 3,
-                "enable_fallback": True,
-            },
             "ner": ner_config,
             "relation_extraction": re_config,
             "retrieval": {
@@ -190,7 +191,7 @@ class DeepLightRAG:
     def _init_ocr(self):
         """Initialize OCR components with GPU support"""
         device_info = f" on {self.device}" if hasattr(self, "device") else ""
-        print(f"\n[1/4] Initializing DeepSeek-OCR{device_info}...")
+        print(f"\n[1/3] Initializing DeepSeek-OCR{device_info}...")
         ocr_config = self.config.get("ocr", {})
 
         # Pass all GPU-related parameters
@@ -226,7 +227,7 @@ class DeepLightRAG:
     def _init_graph(self):
         """Initialize graph components with GPU awareness"""
         device_info = f" on {self.device}" if hasattr(self, "device") else ""
-        print(f"\n[3/4] Initializing Dual-Layer Graph{device_info}...")
+        print(f"\n[2/3] Initializing Dual-Layer Graph{device_info}...")
 
         # Pass device and configuration to graph
         graph_kwargs = {
@@ -238,16 +239,12 @@ class DeepLightRAG:
         if hasattr(self, "device") and self.device == "cuda":
             graph_kwargs["enable_gpu_acceleration"] = True
 
-        # Pass LLM for fallback functionality
-        if hasattr(self, "llm"):
-            graph_kwargs["llm"] = self.llm
-
         self.dual_layer_graph = DualLayerGraph(**graph_kwargs)
         print("  ✅ Dual-Layer Graph initialized")
 
     def _init_retriever(self):
         """Initialize retrieval components with visual awareness"""
-        print("\n[4/4] Initializing Visual-Aware Adaptive Retriever...")
+        print("\n[3/3] Initializing Visual-Aware Adaptive Retriever...")
         retrieval_config = self.config.get("retrieval", {})
 
         self.query_classifier = QueryClassifier()
@@ -262,45 +259,14 @@ class DeepLightRAG:
                 visual_weight=retrieval_config.get("visual_weight", 0.3),
                 enable_visual_fallback=retrieval_config.get("enable_visual_fallback", True),
             )
-            print("  Visual-Aware Retriever initialized")
+            print("  ✅ Visual-Aware Retriever initialized")
         else:
             self.retriever = AdaptiveRetriever(self.dual_layer_graph, self.query_classifier)
-            print("  Traditional Adaptive Retriever initialized")
+            print("  ✅ Traditional Adaptive Retriever initialized")
+        
+        print("\n🚀 System Ready! (Indexing & Retrieval Only)")
 
-    def _init_llm(self):
-        """Initialize LLM components - ONLY for generation phase"""
-        print("\n[2/4] Initializing LLM for GENERATION ONLY...")
-        llm_config_dict = self.config.get("llm", {})
 
-        try:
-            # Create LLMConfig from dictionary
-            llm_config = LLMConfig(
-                provider=llm_config_dict.get("provider", "gemini"),
-                model=llm_config_dict.get("model", "gemini-1.5-pro"),
-                api_key=llm_config_dict.get("api_key"),
-                temperature=llm_config_dict.get("temperature", 0.7),
-                max_tokens=llm_config_dict.get("max_tokens", 8192),
-                top_p=llm_config_dict.get("top_p", 0.9),
-                top_k=llm_config_dict.get("top_k", 40),
-                frequency_penalty=llm_config_dict.get("frequency_penalty", 0.0),
-                presence_penalty=llm_config_dict.get("presence_penalty", 0.0),
-                base_url=llm_config_dict.get("base_url"),
-                timeout=llm_config_dict.get("timeout", 30),
-                retry_attempts=llm_config_dict.get("retry_attempts", 3),
-            )
-
-            # Create LLM instance using factory
-            self.llm = LLMFactory.from_config(llm_config)
-
-            print(f"  ✅ {llm_config.provider.upper()} LLM initialized for GENERATION ONLY")
-            print(f"  Model: {llm_config.model}")
-            print(f"  Usage: Final answer generation ONLY (NO intermediate processing)")
-
-        except Exception as e:
-            logger.error(f"Failed to initialize LLM: {e}")
-            raise
-
-        print("\n🚀 System Ready! LLM restricted to generation phase only.")
 
     def index_document(
         self, pdf_path: str, document_id: Optional[str] = None, save_to_disk: bool = True
@@ -439,22 +405,23 @@ class DeepLightRAG:
             print(f"\nERROR: Indexing failed - {e}")
             raise
 
-    def query(
-        self, question: str, enable_reasoning: bool = False, override_level: Optional[int] = None
+    def retrieve(
+        self, question: str, override_level: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Query the indexed document
+        Retrieve relevant context for a query (NO generation)
+        
+        Use the returned context with ANY LLM of your choice for generation.
 
         Args:
             question: User question
-            enable_reasoning: Enable chain-of-thought reasoning
             override_level: Override automatic query level classification
 
         Returns:
-            Query results with answer and metadata
+            Retrieval results with context and metadata
         """
         print("\n" + "-" * 60)
-        print(f"QUERY: {question}")
+        print(f"RETRIEVAL: {question}")
         print("-" * 60)
 
         start_time = time.time()
@@ -492,30 +459,7 @@ class DeepLightRAG:
             print(f"Retrieved {retrieval_result['nodes_retrieved']} nodes")
             print(f"Token count: ~{retrieval_result['token_count']}")
 
-        # Generate answer with visual support
-        print("\n[Generating Answer]...")
-        if hasattr(self.llm, "generate_with_visual_context") and visual_embeddings:
-            # Use multimodal generation
-            if enable_reasoning:
-                llm_result = self.llm.generate_with_reasoning_and_visual(
-                    context, visual_embeddings, question
-                )
-                answer = llm_result["answer"]
-                reasoning = llm_result.get("reasoning", "")
-            else:
-                answer = self.llm.generate_with_visual_context(context, visual_embeddings, question)
-                reasoning = ""
-        else:
-            # Traditional generation
-            if enable_reasoning:
-                llm_result = self.llm.generate_with_reasoning(context, question)
-                answer = llm_result["answer"]
-                reasoning = llm_result.get("reasoning", "")
-            else:
-                answer = self.llm.generate(context, question)
-                reasoning = ""
-
-        query_time = time.time() - start_time
+        retrieval_time = time.time() - start_time
 
         # Update stats
         self.stats["queries_processed"] += 1
@@ -536,46 +480,49 @@ class DeepLightRAG:
 
         result = {
             "question": question,
-            "answer": answer,
-            "reasoning": reasoning,
+            "context": context,  # Use this with your LLM!
+            "visual_embeddings": visual_embeddings,  # Optional visual context
             "query_level": classification["level"],
+            "level_name": classification["level_name"],
             "strategy": classification["strategy"],
             "tokens_used": tokens_used,
-            "tokens_vs_lightrag": f"{tokens_used} vs 30,000 (fixed)",
-            "token_savings": f"{((30000 - tokens_used) / 30000 * 100):.1f}%",
+            "token_budget": classification["max_tokens"],
             "nodes_retrieved": nodes_retrieved,
-            "query_time": f"{query_time:.2f}s",
+            "retrieval_time": f"{retrieval_time:.2f}s",
+            "retrieval_time_seconds": retrieval_time,
             "entities_found": entities_found,
             "regions_accessed": regions_accessed,
+            "visual_mode": visual_mode if is_visual_retrieval else False,
         }
 
         print("\n" + "-" * 60)
-        print("ANSWER:")
+        print("CONTEXT RETRIEVED (Ready for your LLM)")
         print("-" * 60)
-        print(answer)
-        print(f"\n[Query completed in {result['query_time']}]")
-        print(f"[Token savings: {result['token_savings']}]")
+        print(f"Context length: {len(context)} characters")
+        print(f"Entities: {entities_found}")
+        print(f"Visual regions: {regions_accessed}")
+        print(f"\n[Retrieval completed in {result['retrieval_time']}]")
+        print(f"[Use 'context' field with your LLM for generation]")
 
         return result
 
-    def batch_query(
-        self, questions: List[str], enable_reasoning: bool = False
+    def batch_retrieve(
+        self, questions: List[str]
     ) -> List[Dict[str, Any]]:
         """
-        Process multiple queries
+        Retrieve context for multiple queries
 
         Args:
             questions: List of questions
-            enable_reasoning: Enable reasoning for all queries
 
         Returns:
-            List of query results
+            List of retrieval results
         """
         results = []
         for i, question in enumerate(questions, 1):
             print(f"\n{'='*60}")
-            print(f"Query {i}/{len(questions)}")
-            result = self.query(question, enable_reasoning)
+            print(f"Retrieval {i}/{len(questions)}")
+            result = self.retrieve(question)
             results.append(result)
 
         return results
@@ -589,7 +536,6 @@ class DeepLightRAG:
                 "entity_relationship": self.dual_layer_graph.entity_relationship.get_statistics(),
             },
             "retrieval_stats": self.retriever.get_retrieval_stats(),
-            "llm_info": self.llm.get_model_info(),
         }
 
     def save_state(self, path: Optional[str] = None):

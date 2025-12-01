@@ -15,12 +15,19 @@ import numpy as np
 from PIL import Image, ImageDraw
 import torch
 
-try:
-    import mlx.core as mx
-    import mlx.nn as nn
+import platform
 
-    HAS_MLX = True
-except Exception:
+# MLX is only available on macOS (Apple Silicon)
+IS_MACOS = platform.system() == "Darwin"
+
+if IS_MACOS:
+    try:
+        import mlx.core as mx
+        import mlx.nn as nn
+        HAS_MLX = True
+    except Exception:
+        HAS_MLX = False
+else:
     HAS_MLX = False
 
 try:
@@ -260,10 +267,19 @@ class DeepSeekOCR:
                 return
             except Exception as e:
                 print(f"Failed to load with transformers: {e}")
-                print("Falling back to MLX...")
+                if IS_MACOS:
+                    print("Falling back to MLX (macOS)...")
+                else:
+                    raise RuntimeError(f"Failed to load model with transformers on {platform.system()}: {e}")
 
-        # Fallback to MLX
-        self._load_mlx_model()
+        # Fallback to MLX (macOS only)
+        if IS_MACOS and HAS_MLX:
+            self._load_mlx_model()
+        else:
+            if not IS_MACOS:
+                raise RuntimeError(f"MLX is only available on macOS. Current platform: {platform.system()}")
+            else:
+                raise RuntimeError("No suitable model backend available. Install transformers or mlx-vlm.")
 
     def _load_transformers_model(self):
         """Load using transformers for better GPU support"""
@@ -314,7 +330,10 @@ class DeepSeekOCR:
             )
 
     def _load_mlx_model(self):
-        """Load using MLX (fallback)"""
+        """Load using MLX (macOS only)"""
+        if not IS_MACOS:
+            raise RuntimeError("MLX is only available on macOS. Use GPU/CPU mode on other platforms.")
+        
         try:
             from mlx_vlm import load
             from mlx_vlm.utils import load_config
@@ -322,7 +341,7 @@ class DeepSeekOCR:
         except ImportError:
             raise RuntimeError("mlx_vlm is not installed. Please install: pip install mlx-vlm")
 
-        print(f"Loading {self.model_name} with MLX backend...")
+        print(f"Loading {self.model_name} with MLX backend (macOS)...")
         self.model, self.processor = load(self.model_name, trust_remote_code=True)
         self.config = load_config(self.model_name)
 

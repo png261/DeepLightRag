@@ -1,3 +1,6 @@
-from .deepseek_r1 import DeepSeekR1
+"""
+LLM module for DeepLightRAG
+Currently uses Gemini as the primary LLM provider
+"""
 
-__all__ = ["DeepSeekR1"]
+__all__ = []

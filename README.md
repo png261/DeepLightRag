@@ -47,7 +47,7 @@ Retrieve information:
 deeplightrag retrieve "What is the main topic?" --config config.yaml
 ```
 
-### Configuration Configuration (config.yaml)
+### Configuration File (config.yaml)
 
 You can customize the model and system behavior using a YAML file:
 

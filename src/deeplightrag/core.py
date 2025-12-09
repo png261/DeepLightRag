@@ -8,11 +8,12 @@ import json
 import logging
 import os
 import time
+import numpy as np
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .graph.dual_layer import DualLayerGraph
-from .ocr.deepseek_ocr import DeepSeekOCR
+# from .ocr.deepseek_ocr import DeepSeekOCR  # Refactored to use factory
 from .ocr.processor import PDFProcessor
 from .retrieval.adaptive_retriever import AdaptiveRetriever
 from .retrieval.query_classifier import QueryClassifier
@@ -21,21 +22,27 @@ from .retrieval.query_classifier import QueryClassifier
 logger = logging.getLogger(__name__)
 
 
+from .utils.config_manager import config_manager
+from .utils.component_factory import component_factory
+
 class DeepLightRAG:
     def __init__(self, config: Optional[Dict] = None, storage_dir: str = "./deeplightrag_data"):
-        self.config = config or self._default_config()
+        self.config = config or config_manager.get_default_config()
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
         # Auto-detect GPU and optimize configuration
-        self._setup_gpu_optimization()
+        self.device = config_manager.setup_gpu_optimization(self.config)
+        self.gpu_name = self.device  # simplified for now, or fetch from device info if needed
 
         print("=" * 60)
         print("  DeepLightRAG: Indexing & Retrieval System")
         print("  High-performance indexing with vision-text compression")
         print("  Use with ANY LLM for generation")
-        if hasattr(self, "device") and self.device == "cuda":
-            print(f"  🎮 GPU Acceleration: {self.gpu_name}")
+        if self.device == "cuda":
+            print(f"  🎮 GPU Acceleration: {self.device}")
+        elif self.device == "mps":
+             print(f"  🚀 Apple Silicon Acceleration: {self.device}")
         print("=" * 60)
 
         self._init_ocr()
@@ -60,169 +67,22 @@ class DeepLightRAG:
             except Exception as e:
                 print(f"⚠️ GPU cleanup warning: {e}")
 
-    def _setup_gpu_optimization(self):
-        """Auto-detect and configure GPU settings"""
-        try:
-            import torch
-
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
-            if self.device == "cuda":
-                self.gpu_name = torch.cuda.get_device_name(0)
-                self.gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-
-                # Auto-configure for GPU
-                if "ocr" in self.config:
-                    self.config["ocr"]["device"] = "cuda"
-                    self.config["ocr"]["torch_dtype"] = "float16"
-                if "ner" in self.config:
-                    self.config["ner"]["device"] = "cuda"
-                if "relation_extraction" in self.config:
-                    self.config["relation_extraction"]["device"] = "cuda"
-
-        except ImportError:
-            self.device = "cpu"
-
-    def _default_config(self) -> Dict:
-        """Default configuration with auto GPU detection"""
-        import torch
-        import platform
-
-        is_macos = platform.system() == "Darwin"
-        
-        # Auto-detect optimal model based on hardware
-        if torch.cuda.is_available():
-            # GPU configuration - better models
-            ocr_config = {
-                "model_name": "deepseek-ai/deepseek-ocr",
-                "quantization": "none",
-                "resolution": "large",
-                "device": "cuda",
-                "torch_dtype": "float16",
-                "batch_size": 4,
-                "enable_visual_embeddings": True,
-                "embedding_compression": "pca",
-                "target_embedding_dim": 512,
-            }
-            ner_config = {
-                "primary_model": "gliner",
-                "device": "cuda",
-                "gliner": {
-                    "model_name": "urchade/gliner_large-v2.1",
-                    "confidence_threshold": 0.3,
-                    "device": "cuda",
-                    "torch_dtype": "float16",
-                    "batch_size": 16,
-                },
-                "bert": {
-                    "model_name": "microsoft/deberta-v3-large",
-                    "confidence_threshold": 0.4,
-                    "device": "cuda",
-                    "torch_dtype": "float16",
-                },
-            }
-            re_config = {
-                "primary_model": "deberta",
-                "device": "cuda",
-                "deberta": {
-                    "model_name": "microsoft/deberta-v3-large",
-                    "confidence_threshold": 0.4,
-                    "device": "cuda",
-                    "torch_dtype": "float16",
-                    "max_length": 768,
-                    "batch_size": 8,
-                },
-            }
-        else:
-            # CPU configuration - use MLX on macOS, transformers elsewhere
-            if is_macos:
-                # macOS: Use MLX 4-bit quantized model
-                ocr_config = {
-                    "model_name": "mlx-community/DeepSeek-OCR-4bit",
-                    "quantization": "4bit",
-                    "resolution": "base",
-                    "device": "cpu",
-                    "enable_visual_embeddings": True,
-                    "embedding_compression": "pca",
-                    "target_embedding_dim": 256,
-                }
-            else:
-                # Other platforms: Use transformers CPU mode
-                ocr_config = {
-                    "model_name": "deepseek-ai/deepseek-ocr",
-                    "quantization": "8bit",  # CPU-friendly quantization
-                    "resolution": "base",
-                    "device": "cpu",
-                    "enable_visual_embeddings": True,
-                    "embedding_compression": "pca",
-                    "target_embedding_dim": 256,
-                }
-            ner_config = {
-                "primary_model": "gliner",
-                "device": "cpu",
-                "gliner": {
-                    "model_name": "urchade/gliner_base",
-                    "confidence_threshold": 0.4,
-                    "device": "cpu",
-                },
-            }
-            re_config = {
-                "primary_model": "deberta",
-                "device": "cpu",
-                "deberta": {
-                    "model_name": "microsoft/deberta-v3-base",
-                    "confidence_threshold": 0.5,
-                    "device": "cpu",
-                },
-            }
-
-        return {
-            "ocr": ocr_config,
-            "ner": ner_config,
-            "relation_extraction": re_config,
-            "retrieval": {
-                "enable_adaptive": True,
-                "default_level": 2,
-                "visual_weight": 0.3,
-                "enable_visual_fallback": True,
-            },
-        }
-
     def _init_ocr(self):
-        """Initialize OCR components with GPU support"""
+        """Initialize OCR components with GPU support via Factory"""
         device_info = f" on {self.device}" if hasattr(self, "device") else ""
-        print(f"\n[1/3] Initializing DeepSeek-OCR{device_info}...")
-        ocr_config = self.config.get("ocr", {})
-
-        # Pass all GPU-related parameters
-        init_kwargs = {
-            "model_name": ocr_config.get("model_name", "mlx-community/DeepSeek-OCR-4bit"),
-            "quantization": ocr_config.get("quantization", "4bit"),
-            "resolution": ocr_config.get("resolution", "base"),
-            "enable_visual_embeddings": ocr_config.get("enable_visual_embeddings", True),
-            "embedding_compression": ocr_config.get("embedding_compression", "pca"),
-            "target_embedding_dim": ocr_config.get("target_embedding_dim", 256),
-        }
-
-        # Add GPU parameters if available
-        if "device" in ocr_config:
-            init_kwargs["device"] = ocr_config["device"]
-        if "torch_dtype" in ocr_config:
-            import torch
-
-            init_kwargs["torch_dtype"] = (
-                torch.float16 if ocr_config["torch_dtype"] == "float16" else torch.float32
-            )
-        if "batch_size" in ocr_config:
-            init_kwargs["batch_size"] = ocr_config["batch_size"]
-
-        self.ocr_model = DeepSeekOCR(**init_kwargs)
+        print(f"\n[1/3] Initializing OCR/VLM Processor{device_info}...")
+        
+        # Use Factory to create the configured OCR processor
+        self.ocr_model = component_factory.create_ocr_processor(self.config)
         self.pdf_processor = PDFProcessor(self.ocr_model)
 
+        ocr_config = self.config.get("ocr", {})
         visual_status = (
-            "enabled" if ocr_config.get("enable_visual_embeddings", True) else "disabled"
+            "enabled" if ocr_config.get(
+                "enable_visual_embeddings", True) else "disabled"
         )
-        print(f"  ✅ DeepSeek-OCR initialized (Visual embeddings: {visual_status})")
+        print(
+            f"  ✅ DeepSeek-OCR initialized (Visual embeddings: {visual_status})")
 
     def _init_graph(self):
         """Initialize graph components with GPU awareness"""
@@ -240,14 +100,42 @@ class DeepLightRAG:
             graph_kwargs["enable_gpu_acceleration"] = True
 
         self.dual_layer_graph = DualLayerGraph(**graph_kwargs)
-        print("  ✅ Dual-Layer Graph initialized")
+
+        # Try to load existing graph data from storage directory
+        graph_data_path = self.storage_dir / "basic-text"
+        if graph_data_path.exists():
+            print(f"  Loading existing graph from {graph_data_path}")
+            try:
+                self.dual_layer_graph.load(str(graph_data_path))
+                print(f"  ✅ Dual-Layer Graph loaded from storage")
+            except Exception as e:
+                print(f"  ⚠️ Warning: Failed to load existing graph: {e}")
+                print(f"  ✅ Dual-Layer Graph initialized (empty)")
+        else:
+            print("  ✅ Dual-Layer Graph initialized (empty)")
 
     def _init_retriever(self):
         """Initialize retrieval components with visual awareness"""
         print("\n[3/3] Initializing Visual-Aware Adaptive Retriever...")
         retrieval_config = self.config.get("retrieval", {})
 
-        self.query_classifier = QueryClassifier()
+        # Get model storage configuration
+        models_config = self.config.get("models", {}).get("query_classifier", {})
+        save_path = models_config.get("save_path", "query_classifier_model")
+        
+        # Check if we should use absolute path based on storage_dir
+        import os
+        if not os.path.isabs(save_path):
+            # Determine base directory: storage_dir or config-defined base
+            storage_conf = self.config.get("storage", {})
+            base_dir = self.storage_dir or storage_conf.get("base_dir", "./deep_light_rag_data")
+            model_dir = storage_conf.get("model_dir", "models")
+            save_path = os.path.join(base_dir, model_dir, save_path)
+
+        self.query_classifier = QueryClassifier(
+            model_save_path=save_path,
+            device=getattr(self, "device", "cpu")
+        )
 
         # Use visual-aware retriever if visual embeddings are enabled
         if self.config.get("ocr", {}).get("enable_visual_embeddings", True):
@@ -257,16 +145,15 @@ class DeepLightRAG:
                 self.dual_layer_graph,
                 self.query_classifier,
                 visual_weight=retrieval_config.get("visual_weight", 0.3),
-                enable_visual_fallback=retrieval_config.get("enable_visual_fallback", True),
+                config=self.config
             )
             print("  ✅ Visual-Aware Retriever initialized")
         else:
-            self.retriever = AdaptiveRetriever(self.dual_layer_graph, self.query_classifier)
+            self.retriever = AdaptiveRetriever(
+                self.dual_layer_graph, self.query_classifier, config=self.config)
             print("  ✅ Traditional Adaptive Retriever initialized")
-        
+
         print("\n🚀 System Ready! (Indexing & Retrieval Only)")
-
-
 
     def index_document(
         self, pdf_path: str, document_id: Optional[str] = None, save_to_disk: bool = True
@@ -346,7 +233,8 @@ class DeepLightRAG:
 
                 # Save OCR results
                 try:
-                    self.pdf_processor.save_results(ocr_results, str(doc_dir / "ocr_results.json"))
+                    self.pdf_processor.save_results(
+                        ocr_results, str(doc_dir / "ocr_results.json"))
                     logger.info("OCR results saved")
                 except Exception as e:
                     logger.error(f"Failed to save OCR results: {e}")
@@ -356,14 +244,16 @@ class DeepLightRAG:
             total_pages = len(ocr_results)
             total_tokens = sum(r.total_tokens for r in ocr_results)
             estimated_original = total_pages * 2500
-            compression_ratio = estimated_original / total_tokens if total_tokens > 0 else 0
+            compression_ratio = estimated_original / \
+                total_tokens if total_tokens > 0 else 0
 
             indexing_time = time.time() - start_time
 
             # Update global stats
             self.stats["documents_indexed"] += 1
             self.stats["total_pages"] += total_pages
-            self.stats["total_tokens_saved"] += estimated_original - total_tokens
+            self.stats["total_tokens_saved"] += estimated_original - \
+                total_tokens
 
             results = {
                 "document_id": document_id,
@@ -410,7 +300,7 @@ class DeepLightRAG:
     ) -> Dict[str, Any]:
         """
         Retrieve relevant context for a query (NO generation)
-        
+
         Use the returned context with ANY LLM of your choice for generation.
 
         Args:
@@ -429,6 +319,7 @@ class DeepLightRAG:
         # Classify query
         classification = self.query_classifier.analyze_query(question)
         print(f"\nQuery Level: {classification['level']} ({classification['level_name']})")
+
         print(f"Token Budget: {classification['max_tokens']}")
         print(f"Strategy: {classification['strategy']}")
 
@@ -444,9 +335,7 @@ class DeepLightRAG:
             visual_embeddings = retrieval_result.visual_context
             visual_mode = retrieval_result.visual_mode_used
 
-            print(
-                f"Retrieved {retrieval_result.nodes_retrieved} nodes (Visual mode: {visual_mode})"
-            )
+            print(f"Retrieved {retrieval_result.nodes_retrieved} nodes (Visual mode: {visual_mode})")
             print(f"Token count: ~{retrieval_result.token_count}")
             if visual_embeddings:
                 print(f"Visual embeddings: {len(visual_embeddings)}")
@@ -465,6 +354,17 @@ class DeepLightRAG:
         self.stats["queries_processed"] += 1
 
         # Handle both dictionary (from traditional retriever) and object (from visual retriever)
+        # Safety check: ensure retrieval_result is not a string or other unexpected type
+        if isinstance(retrieval_result, str):
+            print(f"ERROR: retrieval_result is a string: {retrieval_result[:100]}")
+            retrieval_result = {
+                "context": retrieval_result,
+                "entities": [],
+                "regions": [],
+                "token_count": len(retrieval_result) // 4,
+                "nodes_retrieved": 0,
+            }
+        
         if hasattr(retrieval_result, "token_count"):
             # VisualRetrievalResult object
             tokens_used = retrieval_result.token_count
@@ -473,15 +373,25 @@ class DeepLightRAG:
             regions_accessed = len(getattr(retrieval_result, "regions", []))
         else:
             # Dictionary result
-            tokens_used = retrieval_result["token_count"]
-            nodes_retrieved = retrieval_result["nodes_retrieved"]
+            tokens_used = retrieval_result.get("token_count", 0)
+            nodes_retrieved = retrieval_result.get("nodes_retrieved", 0)
             entities_found = len(retrieval_result.get("entities", []))
             regions_accessed = len(retrieval_result.get("regions", []))
 
+        # Extract entities and regions from result
+        if hasattr(retrieval_result, "entities"):
+            entities_list = [e.to_dict() if hasattr(e, 'to_dict') else e for e in retrieval_result.entities]
+            regions_list = [r.to_dict() if hasattr(r, 'to_dict') else r for r in retrieval_result.regions]
+        else:
+            entities_list = retrieval_result.get("entities", [])
+            regions_list = retrieval_result.get("regions", [])
+        
         result = {
             "question": question,
-            "context": context,  # Use this with your LLM!
+            "context": context,  # Raw markdown context
             "visual_embeddings": visual_embeddings,  # Optional visual context
+            "entities": entities_list,  # Retrieved entities
+            "regions": regions_list,  # Retrieved regions
             "query_level": classification["level"],
             "level_name": classification["level_name"],
             "strategy": classification["strategy"],
@@ -494,15 +404,21 @@ class DeepLightRAG:
             "regions_accessed": regions_accessed,
             "visual_mode": visual_mode if is_visual_retrieval else False,
         }
+        
+        # Format with TOON for better LLM consumption
+        from .retrieval.toon_formatter import format_toon_context
+        result["formatted_context"] = format_toon_context(result, simple=True)
 
         print("\n" + "-" * 60)
         print("CONTEXT RETRIEVED (Ready for your LLM)")
         print("-" * 60)
-        print(f"Context length: {len(context)} characters")
+        print(f"Raw context: {len(context)} characters")
+        print(f"Formatted (TOON): {len(result['formatted_context'])} characters")
         print(f"Entities: {entities_found}")
         print(f"Visual regions: {regions_accessed}")
+        print(f"Visual embeddings: {len(visual_embeddings)}")
         print(f"\n[Retrieval completed in {result['retrieval_time']}]")
-        print(f"[Use 'context' field with your LLM for generation]")
+        print(f"[Use 'formatted_context' field (TOON format) with your LLM]")
 
         return result
 
@@ -543,7 +459,8 @@ class DeepLightRAG:
         if path is None:
             path = str(self.storage_dir / "system_state.json")
 
-        state = {"config": self.config, "stats": self.stats, "storage_dir": str(self.storage_dir)}
+        state = {"config": self.config, "stats": self.stats,
+                 "storage_dir": str(self.storage_dir)}
 
         with open(path, "w") as f:
             json.dump(state, f, indent=2)
@@ -560,141 +477,298 @@ class DeepLightRAG:
         print(f"Loading document: {document_id}")
         self.dual_layer_graph.load(str(doc_dir))
 
-        # Reinitialize retriever with loaded graph
-        self.retriever = AdaptiveRetriever(self.dual_layer_graph, self.query_classifier)
+        # Reinitialize retriever with loaded graph (preserve visual awareness)
+        retrieval_config = self.config.get("retrieval", {})
+        if self.config.get("ocr", {}).get("enable_visual_embeddings", True):
+            from .retrieval.visual_aware_retriever import VisualAwareRetriever
+            
+            self.retriever = VisualAwareRetriever(
+                self.dual_layer_graph,
+                self.query_classifier,
+                visual_weight=retrieval_config.get("visual_weight", 0.3),
+            )
+        else:
+            self.retriever = AdaptiveRetriever(
+                self.dual_layer_graph, self.query_classifier)
 
         print(f"Document {document_id} loaded successfully")
 
-    def compare_with_lightrag(self, query: str) -> Dict:
+    def extract_entities(self, text: str, visual_regions: List = None) -> List[Dict]:
         """
-        Compare performance with LightRAG baseline
-
-        Returns metrics comparison
-        """
-        # Our approach
-        our_result = self.query(query)
-
-        comparison = {
-            "query": query,
-            "visual_graph_rag": {
-                "tokens_used": our_result["tokens_used"],
-                "query_time": our_result["query_time"],
-                "strategy": our_result["strategy"],
-                "nodes_retrieved": our_result["nodes_retrieved"],
-            },
-            "lightrag_baseline": {
-                "tokens_used": 30000,  # Fixed
-                "estimated_time": "3-5s",
-                "strategy": "fixed_chunking",
-            },
-            "improvements": {
-                "token_reduction": f"{((30000 - our_result['tokens_used']) / 30000 * 100):.1f}%",
-                "estimated_cost_savings": f"{((30000 - our_result['tokens_used']) / 30000 * 100):.1f}%",
-            },
-        }
-
-        return comparison
-
-    def build_graph_from_ocr(self, ocr_results: List) -> "GraphWrapper":
-        """
-        Build dual-layer graph from OCR results
+        Extract entities using GLiNER with optional visual context.
 
         Args:
-            ocr_results: List of PageOCRResult from DeepSeek-OCR
+            text: Input text to extract entities from
+            visual_regions: Optional list of VisualRegion objects for visual context
 
         Returns:
-            GraphWrapper object with retriever and summary methods
+            List of extracted entities with metadata
         """
-        print("\n[GRAPH] Building Dual-Layer Graph from OCR results...")
-        self.dual_layer_graph.build_from_ocr_results(ocr_results)
-        return GraphWrapper(self)
+        try:
+            # Initialize GLiNER model
+            from .ner.working_gliner_ner import GLiNERNERExtractor
 
-    def load_graph(self, graph_path: str):
+            ner_extractor = GLiNERNERExtractor(
+                model_name=self.config.get("ner", {}).get("model", "urchade/gliner_base-v2.1"),
+                device=getattr(self, "device", "cpu"),
+                confidence_threshold=self.config.get("ner", {}).get("threshold", 0.3)
+            )
+
+            # Extract entities
+            if visual_regions:
+                # Use visual context if available
+                entities = ner_extractor.extract_entities_with_visual_context(text, visual_regions)
+            else:
+                # Standard entity extraction
+                entities = ner_extractor.extract_entities(text)
+
+            return entities
+
+        except Exception as e:
+            logger.error(f"Entity extraction failed: {e}")
+            return []
+
+    def extract_relations(self, entities: List[Dict], text: str, visual_regions: List = None) -> List[Dict]:
         """
-        Load a graph from a file path
+        Extract relations using GLiREL with optional visual context.
 
         Args:
-            graph_path: Path to the graph directory or JSON file
-        """
-        # Handle different path formats
-        if graph_path.endswith(".json"):
-            # If path is to a specific JSON file, get the directory
-            graph_dir = os.path.dirname(graph_path)
-        else:
-            graph_dir = graph_path
-
-        if not os.path.exists(graph_dir):
-            raise FileNotFoundError(f"Graph directory not found: {graph_dir}")
-
-        print(f"Loading graph from: {graph_dir}")
-        self.dual_layer_graph.load(graph_dir)
-
-        # Reinitialize retriever with loaded graph
-        self.retriever = AdaptiveRetriever(self.dual_layer_graph, self.query_classifier)
-
-        print(f"Graph loaded successfully from {graph_dir}")
-
-
-class GraphWrapper:
-    """
-    Wrapper for DualLayerGraph providing simplified API for testing
-    """
-
-    def __init__(self, rag_system: DeepLightRAG):
-        self.rag_system = rag_system
-        self.graph = rag_system.dual_layer_graph
-        self.retriever = rag_system.retriever
-
-    def get_retriever(self) -> "RetrieverWrapper":
-        """Get a retriever object for this graph"""
-        return RetrieverWrapper(self.rag_system)
-
-    def summary(self) -> Dict[str, Any]:
-        """Get summary statistics of the graph"""
-        vs_stats = self.graph.visual_spatial.get_statistics()
-        er_stats = self.graph.entity_relationship.get_statistics()
-
-        return {
-            "visual_spatial": {
-                "nodes": vs_stats["num_nodes"],
-                "edges": vs_stats["num_edges"],
-                "pages": vs_stats["num_pages"],
-                "avg_degree": vs_stats["avg_degree"],
-            },
-            "entity_relationship": {
-                "entities": er_stats["num_entities"],
-                "relationships": er_stats["num_relationships"],
-                "avg_degree": er_stats["avg_entity_degree"],
-            },
-            "cross_layer": {
-                "entity_to_region_mappings": len(self.graph.entity_to_regions),
-                "region_to_entity_mappings": len(self.graph.region_to_entities),
-                "figure_caption_links": len(self.graph.figure_caption_links),
-            },
-            "total_compressed_tokens": sum(
-                node.region.token_count for node in self.graph.visual_spatial.nodes.values()
-            ),
-        }
-
-
-class RetrieverWrapper:
-    """
-    Wrapper for AdaptiveRetriever providing simplified retrieve method
-    """
-
-    def __init__(self, rag_system: DeepLightRAG):
-        self.rag_system = rag_system
-        self.retriever = rag_system.retriever
-
-    def retrieve(self, query: str) -> str:
-        """
-        Retrieve context for a query
-
-        Args:
-            query: User query string
+            entities: List of extracted entities
+            text: Original text for context
+            visual_regions: Optional list of VisualRegion objects for layout context
 
         Returns:
-            Context string for LLM generation
+            List of extracted relations with metadata
         """
-        result = self.retriever.retrieve(query)
-        return result["context"]
+        try:
+            # Initialize GLiREL model
+            from .ner.working_enhanced_ner import EnhancedNERPipeline
+
+            relation_extractor = EnhancedNERPipeline(
+                model_name=self.config.get("relation_extraction", {}).get("model", "knowledgator/GLiREL"),
+                device=getattr(self, "device", "cpu"),
+                confidence_threshold=self.config.get("relation_extraction", {}).get("threshold", 0.3)
+            )
+
+            # Extract relations
+            if visual_regions:
+                # Use visual/layout context if available
+                relations = relation_extractor.extract_relations_with_layout(
+                    entities, text, visual_regions
+                )
+            else:
+                # Standard relation extraction
+                relations = relation_extractor.extract_relations(entities, text)
+
+            return relations
+
+        except Exception as e:
+            logger.error(f"Relation extraction failed: {e}")
+            return []
+
+    def process_text_document(self, text: str, document_id: str = None, save_to_disk: bool = True) -> Dict:
+        """
+        Process a text document (not PDF) through the full pipeline.
+
+        Args:
+            text: Input text to process
+            document_id: Optional document identifier
+            save_to_disk: Whether to save results to disk
+
+        Returns:
+            Processing results with statistics
+        """
+        if document_id is None:
+            document_id = f"text_doc_{int(time.time())}"
+
+        try:
+            # Phase 1: Create VisualRegions from text
+            print("\n[PHASE 1] Converting text to Visual Regions...")
+            logger.info("Creating visual regions from text")
+
+            # Convert text to VisualRegions with mock spatial layout
+            visual_regions = self._text_to_visual_regions(text)
+
+            # Phase 2: Entity Extraction
+            print("\n[PHASE 2] Extracting Entities...")
+            logger.info("Extracting entities with GLiNER")
+            entities = self.extract_entities(text, visual_regions)
+
+            # Phase 3: Relation Extraction
+            print("\n[PHASE 3] Extracting Relations...")
+            logger.info("Extracting relations with GLiREL")
+            relations = self.extract_relations(entities, text, visual_regions)
+
+            # Phase 4: Graph Construction
+            print("\n[PHASE 4] Building Graph...")
+            logger.info("Building dual-layer graph")
+
+            # Create OCR-like results for graph builder
+            ocr_result = self._visual_regions_to_ocr_results(visual_regions)
+
+            # Build graph from results
+            self.dual_layer_graph.build_from_ocr_results([ocr_result])
+
+            # Phase 5: Save to disk
+            if save_to_disk:
+                print("\n[PHASE 5] Saving to disk...")
+                logger.info(f"Saving to {self.storage_dir}")
+                doc_dir = self.storage_dir / document_id
+                doc_dir.mkdir(parents=True, exist_ok=True)
+
+                # Save graph
+                self.dual_layer_graph.save(str(doc_dir))
+
+                # Save processing results
+                results = {
+                    "document_id": document_id,
+                    "text_length": len(text),
+                    "entities": entities,
+                    "relations": relations,
+                    "visual_regions": len(visual_regions),
+                    "processing_time": time.time()
+                }
+
+                import json
+                with open(doc_dir / "processing_results.json", 'w') as f:
+                    json.dump(results, f, indent=2)
+
+            # Update statistics
+            self.stats["documents_indexed"] += 1
+
+            return {
+                "document_id": document_id,
+                "entities_found": len(entities),
+                "relations_found": len(relations),
+                "visual_regions": len(visual_regions),
+                "status": "success"
+            }
+
+        except Exception as e:
+            logger.error(f"Document processing failed: {e}")
+            return {
+                "document_id": document_id,
+                "status": "failed",
+                "error": str(e)
+            }
+
+    def _text_to_visual_regions(self, text: str) -> List:
+        """Convert text to VisualRegions with spatial layout."""
+        from .ocr.deepseek_ocr import VisualRegion, BoundingBox, VisualToken
+
+        regions = []
+        lines = text.split('\n')
+
+        y_position = 50
+        for line_num, line in enumerate(lines):
+            if not line.strip():
+                y_position += 30
+                continue
+
+            # Determine block type
+            if line.strip().startswith('# '):
+                block_type = "header"
+                x1, x2 = 50, 600
+            elif line.strip().startswith('## '):
+                block_type = "subheader"
+                x1, x2 = 70, 580
+            elif line.strip().startswith('- ') or line.strip().startswith('* '):
+                block_type = "list"
+                x1, x2 = 100, 600
+            else:
+                block_type = "paragraph"
+                x1, x2 = 70, 700
+
+            y1 = y_position
+            y2 = y1 + 25
+
+            # Create VisualRegion with comprehensive features
+            region = VisualRegion(
+                region_id=f"region_{line_num}",
+                page_num=1,
+                block_type=block_type,
+                bbox=BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2),
+                compressed_tokens=self._create_tokens_from_text(line),
+                text_content=line.strip(),
+                markdown_content=line.strip(),
+                token_count=len(line.split()) // 3,
+                confidence=0.9,
+
+                # Enhanced visual features
+                region_embedding=self._create_embedding(line),
+                visual_complexity=0.5 + (len(line) / 200),
+                spatial_features={
+                    "position_weight": 0.8,
+                    "center_distance": abs(400 - (x1 + x2) / 2),
+                    "page_position": y1 / 1000
+                },
+                layout_features={
+                    "reading_order": line_num,
+                    "text_block_type": block_type,
+                    "is_title": block_type == "header"
+                },
+                quality_metrics={
+                    "clarity_score": 0.9,
+                    "contrast_score": 0.85
+                }
+            )
+
+            regions.append(region)
+            y_position = y2 + 15
+
+        return regions
+
+    def _create_tokens_from_text(self, text: str) -> List:
+        """Create visual tokens from text."""
+        from .ocr.deepseek_ocr import VisualToken
+        import numpy as np
+
+        words = text.split()
+        tokens = []
+
+        for i, word in enumerate(words):
+            # Create simplified embedding
+            embedding = np.random.randn(768).astype(np.float32)
+            embedding = embedding / np.linalg.norm(embedding)
+
+            token = VisualToken(
+                token_id=f"token_{i}",
+                embedding=embedding,
+                confidence=0.9,
+                region_type="text"
+            )
+            tokens.append(token)
+
+        return tokens
+
+    def _create_embedding(self, text: str) -> np.ndarray:
+        """Create a simple text embedding."""
+        import numpy as np
+
+        # Simple hash-based embedding (in real implementation, use proper model)
+        embedding = np.zeros(768, dtype=np.float32)
+
+        # Use text hash to create deterministic embedding
+        text_hash = hash(text.strip())
+        for i in range(768):
+            embedding[i] = ((text_hash >> i) & 0xFF) / 255.0
+
+        # Normalize
+        norm = np.linalg.norm(embedding)
+        if norm > 0:
+            embedding = embedding / norm
+
+        return embedding
+
+    def _visual_regions_to_ocr_results(self, visual_regions) -> "PageOCRResult":
+        """Convert VisualRegions to PageOCRResult format."""
+        from .ocr.deepseek_ocr import PageOCRResult
+
+        return PageOCRResult(
+            page_num=0,
+            width=1000,
+            height=1000,
+            regions=visual_regions,
+            total_tokens=sum(len(r.compressed_tokens) for r in visual_regions) if visual_regions else 0,
+            processing_time=0.1
+        )

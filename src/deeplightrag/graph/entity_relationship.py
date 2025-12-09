@@ -25,7 +25,7 @@ class Entity:
     entity_type: str  # person, organization, concept, metric, etc.
     value: Any
     description: str
-    source_regions: List[str]  # Visual region IDs where entity appears
+    source_visual_regions: List[str]  # Visual region IDs where entity appears
     grounding_boxes: List[List[float]]  # Bounding boxes for visual grounding
     block_type_context: List[str]  # Types of blocks where entity appears
     embedding: Optional[np.ndarray] = None
@@ -41,7 +41,7 @@ class Entity:
             "entity_type": self.entity_type,
             "value": str(self.value),
             "description": self.description,
-            "source_regions": self.source_regions,
+            "source_visual_regions": self.source_visual_regions,
             "grounding_boxes": self.grounding_boxes,
             "block_type_context": self.block_type_context,
             "confidence": self.confidence,
@@ -62,7 +62,7 @@ class Relationship:
     weight: float
     spatial_cooccurrence: bool  # Do entities co-occur spatially?
     layout_aware_type: str  # Relationship type from layout context
-    source_regions: List[str]
+    source_visual_regions: List[str]
     evidence_text: str = ""  # Text that supports this relationship
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -75,7 +75,7 @@ class Relationship:
             "weight": self.weight,
             "spatial_cooccurrence": self.spatial_cooccurrence,
             "layout_aware_type": self.layout_aware_type,
-            "source_regions": self.source_regions,
+            "source_visual_regions": self.source_visual_regions,
             "evidence_text": self.evidence_text,
             "metadata": self.metadata,
         }
@@ -119,12 +119,12 @@ class EntityRelationshipGraph:
         Extract entities from OCR results using multiple strategies.
 
         Args:
-            ocr_results: OCR results with visual regions
+            ocr_results: OCR results with visual visual_regions
 
         Returns:
             Number of unique entities extracted
         """
-        print("  Extracting entities from visual regions...")
+        print("  Extracting entities from visual visual_regions...")
 
         if not ocr_results:
             print("    Warning: No OCR results provided")
@@ -134,10 +134,10 @@ class EntityRelationshipGraph:
         extraction_errors = 0
 
         for page_result in ocr_results:
-            if not page_result.regions:
+            if not page_result.visual_regions:
                 continue
 
-            for region in page_result.regions:
+            for region in page_result.visual_regions:
                 try:
                     entities = self._extract_entities_from_region(region)
                     total_mentions += len(entities)
@@ -199,12 +199,14 @@ class EntityRelationshipGraph:
         # NEW: Try GLiNER-based extraction first
         try:
             from ..ner.entity_processor import EntityProcessor
+            from ..ner.entity_filter import EntityFilter
 
             if not hasattr(self, "_entity_processor"):
                 print(f"    Initializing GLiNER entity processor on {self.device}...")
 
                 # Pass GPU configuration to EntityProcessor
                 processor_kwargs = {
+                    "model_name": self.ner_config.get("model_name", "fastino/gliner2-base-v1"),
                     "confidence_threshold": self.ner_config.get("gliner", {}).get(
                         "confidence_threshold", 0.3
                     ),
@@ -216,43 +218,64 @@ class EntityRelationshipGraph:
                     processor_kwargs["device"] = self.device
 
                 self._entity_processor = EntityProcessor(**processor_kwargs)
+                
+            # Initialize entity filter
+            if not hasattr(self, "_entity_filter"):
+                self._entity_filter = EntityFilter(
+                    min_length=2,
+                    max_number_length=3,
+                    confidence_threshold=self.ner_config.get("gliner", {}).get("confidence_threshold", 0.3),
+                )
 
             # Extract using GLiNER
             result = self._entity_processor.process_text(
                 text=text, text_id=region.region_id, region_type=region.block_type
             )
 
-            # Convert GLiNER entities to our format
-            gliner_entities = result.get("entities", [])
-            for gliner_entity in gliner_entities:
-                # Update with region-specific information
-                gliner_entity.source_regions = [region.region_id]
-                gliner_entity.grounding_boxes = [region.bbox.to_list()]
-                gliner_entity.block_type_context = [region.block_type]
-                gliner_entity.page_numbers = [region.page_num]
-                entities.append(gliner_entity)
+            # Get extracted entities (ExtractedEntity objects from GLiNER)
+            extracted_entities = result.get("extracted_entities", [])
+            for gliner_entity in extracted_entities:
+                # Filter low-quality entities
+                if not self._entity_filter.is_valid_entity(
+                    entity_name=gliner_entity.text,
+                    entity_type=gliner_entity.label,
+                    confidence=gliner_entity.confidence,
+                    block_type=region.block_type,
+                    context_text=text,
+                ):
+                    continue
+                
+                # Convert ExtractedEntity to Entity object
+                entity_id = f"entity_{region.region_id}_{gliner_entity.start}_{gliner_entity.end}"
+                entity = Entity(
+                    entity_id=entity_id,
+                    name=gliner_entity.text,
+                    entity_type=gliner_entity.label,  # ← FIX: Use GLiNER2 label as type!
+                    value=gliner_entity.text,
+                    description=f"{gliner_entity.label}: {gliner_entity.text}",
+                    source_visual_regions=[region.region_id],
+                    grounding_boxes=[region.bbox.to_list()],
+                    block_type_context=[region.block_type],
+                    page_numbers=[region.page_num],
+                    confidence=gliner_entity.confidence,
+                    metadata=gliner_entity.metadata or {},
+                )
+                entities.append(entity)
 
             if len(entities) > 0:
                 print(f"    ✅ GLiNER extracted {len(entities)} entities from {region.block_type}")
                 return entities
             else:
-                print(f"    ⚠️ GLiNER found no entities, trying fallback methods...")
+                print(f"    ⚠️ GLiNER found no entities")
+                # No fallback - only GLiNER2 extraction as requested
 
         except Exception as e:
             print(f"    ❌ GLiNER extraction failed: {e}")
-            print(f"    🔄 Falling back to pattern-based extraction...")
+            # No fallback - only GLiNER2 as requested
 
-        # FALLBACK: Original pattern-based extraction
-        entities.extend(self._extract_monetary_entities(text, region))
-        entities.extend(self._extract_date_entities(text, region))
-        entities.extend(self._extract_percentage_entities(text, region))
-        entities.extend(self._extract_numeric_metrics(text, region))
-        entities.extend(self._extract_organizations(text, region))
-        entities.extend(self._extract_technical_terms(text, region))
-        entities.extend(self._extract_key_concepts(text, region))
-        entities.extend(self._extract_processes(text, region))
-
-        print(f"    📊 Pattern-based extraction found {len(entities)} entities")
+        # NO FALLBACK: Pure neural approach only
+        # Note: Pattern-based extraction removed as requested
+        # Only entities extracted by neural networks (GLiNER/GLiNER2) are used
 
         return entities
 
@@ -283,7 +306,7 @@ class EntityRelationshipGraph:
                     entity_type="money",
                     value=value,
                     description=f"Monetary value ({scale}): {value} in context: '{context}'",
-                    source_regions=[region.region_id],
+                    source_visual_regions=[region.region_id],
                     grounding_boxes=[region.bbox.to_list()],
                     block_type_context=[region.block_type],
                     page_numbers=[region.page_num],
@@ -323,7 +346,7 @@ class EntityRelationshipGraph:
                         entity_type="date",
                         value=value,
                         description=f"Date/Time ({date_type}): {value}",
-                        source_regions=[region.region_id],
+                        source_visual_regions=[region.region_id],
                         grounding_boxes=[region.bbox.to_list()],
                         block_type_context=[region.block_type],
                         page_numbers=[region.page_num],
@@ -356,7 +379,7 @@ class EntityRelationshipGraph:
                 entity_type="percentage",
                 value=value,
                 description=f"Percentage: {value} in context: '{context}'",
-                source_regions=[region.region_id],
+                source_visual_regions=[region.region_id],
                 grounding_boxes=[region.bbox.to_list()],
                 block_type_context=[region.block_type],
                 page_numbers=[region.page_num],
@@ -374,7 +397,7 @@ class EntityRelationshipGraph:
         # Pattern: "Label: Number" or "Number Label"
         patterns = [
             r"(?P<label>[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*:\s*(?P<value>[\d,]+(?:\.\d+)?)",
-            r"(?P<value>[\d,]+(?:\.\d+)?)\s+(?P<label>(?:tokens?|pages?|regions?|entities|nodes?|edges?))",
+            r"(?P<value>[\d,]+(?:\.\d+)?)\s+(?P<label>(?:tokens?|pages?|visual_regions?|entities|nodes?|edges?))",
         ]
 
         for pattern in patterns:
@@ -392,7 +415,7 @@ class EntityRelationshipGraph:
                             entity_type="metric",
                             value=value,
                             description=f"Metric {label} with value {value}",
-                            source_regions=[region.region_id],
+                            source_visual_regions=[region.region_id],
                             grounding_boxes=[region.bbox.to_list()],
                             block_type_context=[region.block_type],
                             page_numbers=[region.page_num],
@@ -425,7 +448,7 @@ class EntityRelationshipGraph:
                     entity_type="organization",
                     value=name,
                     description=f"Organization: {name}",
-                    source_regions=[region.region_id],
+                    source_visual_regions=[region.region_id],
                     grounding_boxes=[region.bbox.to_list()],
                     block_type_context=[region.block_type],
                     page_numbers=[region.page_num],
@@ -464,7 +487,7 @@ class EntityRelationshipGraph:
                     entity_type="technology",
                     value=tech,
                     description=f"Technology/Framework: {tech}",
-                    source_regions=[region.region_id],
+                    source_visual_regions=[region.region_id],
                     grounding_boxes=[region.bbox.to_list()],
                     block_type_context=[region.block_type],
                     page_numbers=[region.page_num],
@@ -495,7 +518,7 @@ class EntityRelationshipGraph:
                     entity_type="acronym",
                     value=acronym,
                     description=f"Technical acronym: {acronym}",
-                    source_regions=[region.region_id],
+                    source_visual_regions=[region.region_id],
                     grounding_boxes=[region.bbox.to_list()],
                     block_type_context=[region.block_type],
                     page_numbers=[region.page_num],
@@ -517,7 +540,7 @@ class EntityRelationshipGraph:
                     entity_type="technical_term",
                     value=term,
                     description=f"Technical term: {term}",
-                    source_regions=[region.region_id],
+                    source_visual_regions=[region.region_id],
                     grounding_boxes=[region.bbox.to_list()],
                     block_type_context=[region.block_type],
                     page_numbers=[region.page_num],
@@ -559,7 +582,7 @@ class EntityRelationshipGraph:
                     entity_type="concept",
                     value=match,
                     description=f"Key concept: {match}",
-                    source_regions=[region.region_id],
+                    source_visual_regions=[region.region_id],
                     grounding_boxes=[region.bbox.to_list()],
                     block_type_context=[region.block_type],
                     page_numbers=[region.page_num],
@@ -599,7 +622,7 @@ class EntityRelationshipGraph:
                 entity_type="process",
                 value=process,
                 description=f"Process/Action: {process}",
-                source_regions=[region.region_id],
+                source_visual_regions=[region.region_id],
                 grounding_boxes=[region.bbox.to_list()],
                 block_type_context=[region.block_type],
                 page_numbers=[region.page_num],
@@ -613,9 +636,9 @@ class EntityRelationshipGraph:
         """Merge new entity information with existing entity"""
         existing = self.entities[existing_id]
 
-        # Add new source regions
-        existing.source_regions.extend(new_entity.source_regions)
-        existing.source_regions = list(set(existing.source_regions))
+        # Add new source visual_regions
+        existing.source_visual_regions.extend(new_entity.source_visual_regions)
+        existing.source_visual_regions = list(set(existing.source_visual_regions))
 
         # Add new grounding boxes
         existing.grounding_boxes.extend(new_entity.grounding_boxes)
@@ -645,14 +668,18 @@ class EntityRelationshipGraph:
         Extract relationships between entities using multiple strategies.
 
         Strategies:
-        1. Semantic relationships (from text patterns)
+        0. GLiNER2 unified extraction (ML-based semantic relationships)
+        1. Semantic relationships (from text patterns - fallback)
         2. Spatial co-occurrence (entities in same region)
         3. Layout-aware relationships (table, header-content)
         4. Cross-page relationships (same entity across pages)
         """
         print("  Extracting relationships between entities...")
 
-        # 1. Semantic relationships
+        # 0. Try GLiNER2 unified extraction first (best quality)
+        gliner_rel_count = self._extract_gliner2_relationships(ocr_results)
+        
+        # 1. Semantic relationships (pattern-based fallback)
         self._extract_semantic_relationships(ocr_results)
 
         # 2. Spatial co-occurrence relationships
@@ -665,6 +692,8 @@ class EntityRelationshipGraph:
         self._extract_type_relationships()
 
         print(f"    Extracted {len(self.relationships)} relationships")
+        if gliner_rel_count > 0:
+            print(f"    → Including {gliner_rel_count} GLiNER2 semantic relationships")
         self._print_relationship_distribution()
         return len(self.relationships)
 
@@ -678,6 +707,71 @@ class EntityRelationshipGraph:
         print("    Relationship distribution:")
         for rtype, count in sorted(distribution.items(), key=lambda x: -x[1])[:10]:
             print(f"      - {rtype}: {count}")
+
+    def _extract_gliner2_relationships(self, ocr_results: List[PageOCRResult]) -> int:
+        """Extract semantic relationships using GLiNER2 unified extraction"""
+        if not hasattr(self, "_entity_processor") or self._entity_processor is None:
+            return 0
+        
+        gliner_rel_count = 0
+        
+        # Process each region to extract relationships
+        for page_result in ocr_results:
+            for region in page_result.visual_regions:
+                text = region.text_content
+                
+                # Get entities in this region
+                entities_in_region = [
+                    self.entities[eid]
+                    for eid, entity in self.entities.items()
+                    if region.region_id in entity.source_visual_regions
+                ]
+                
+                if len(entities_in_region) < 2:
+                    continue
+                
+                try:
+                    # Use GLiNER2 to extract relationships
+                    # Note: extract_entities_and_relationships returns (entities, relationships)
+                    gliner_extractor = self._entity_processor.gliner_extractor
+                    _, gliner_relationships = gliner_extractor.extract_entities_and_relationships(
+                        text=text,
+                        region_type=region.block_type
+                    )
+                    
+                    # Convert GLiNER2 relationships to our format
+                    for gliner_rel in gliner_relationships:
+                        # Find matching entities by text
+                        source_ent = None
+                        target_ent = None
+                        
+                        for entity in entities_in_region:
+                            if entity.name.lower() == gliner_rel.get('source', '').lower():
+                                source_ent = entity
+                            if entity.name.lower() == gliner_rel.get('target', '').lower():
+                                target_ent = entity
+                        
+                        if source_ent and target_ent:
+                            rel = Relationship(
+                                source_entity=source_ent.entity_id,
+                                target_entity=target_ent.entity_id,
+                                relationship_type=gliner_rel.get('type', 'related_to'),
+                                description=f"GLiNER2: {gliner_rel.get('type', 'related_to')}",
+                                weight=gliner_rel.get('confidence', 0.75),
+                                spatial_cooccurrence=True,
+                                layout_aware_type=region.block_type,
+                                source_visual_regions=[region.region_id],
+                                evidence_text=text[:200],
+                                metadata={"extraction_method": "gliner2", **gliner_rel.get('metadata', {})}
+                            )
+                            self._add_relationship(rel)
+                            gliner_rel_count += 1
+                            
+                except Exception as e:
+                    # Silently continue if GLiNER2 extraction fails
+                    pass
+        
+        return gliner_rel_count
 
     def _extract_semantic_relationships(self, ocr_results: List[PageOCRResult]):
         """Extract semantic relationships from text patterns"""
@@ -697,14 +791,14 @@ class EntityRelationshipGraph:
         }
 
         for page_result in ocr_results:
-            for region in page_result.regions:
+            for region in page_result.visual_regions:
                 text_lower = region.text_content.lower()
 
                 # Find entities in this region
                 entities_in_region = [
                     eid
                     for eid, entity in self.entities.items()
-                    if region.region_id in entity.source_regions
+                    if region.region_id in entity.source_visual_regions
                 ]
 
                 if len(entities_in_region) < 2:
@@ -725,7 +819,7 @@ class EntityRelationshipGraph:
                                         weight=0.8,
                                         spatial_cooccurrence=True,
                                         layout_aware_type=region.block_type,
-                                        source_regions=[region.region_id],
+                                        source_visual_regions=[region.region_id],
                                         evidence_text=region.text_content[:200],
                                     )
                                     self._add_relationship(rel)
@@ -740,8 +834,8 @@ class EntityRelationshipGraph:
                 entity2 = self.entities[entity_ids[j]]
 
                 # Check for shared regions
-                shared_regions = set(entity1.source_regions).intersection(
-                    set(entity2.source_regions)
+                shared_regions = set(entity1.source_visual_regions).intersection(
+                    set(entity2.source_visual_regions)
                 )
 
                 if shared_regions:
@@ -756,7 +850,7 @@ class EntityRelationshipGraph:
                         weight=weight,
                         spatial_cooccurrence=True,
                         layout_aware_type="spatial",
-                        source_regions=list(shared_regions),
+                        source_visual_regions=list(shared_regions),
                     )
                     self._add_relationship(rel)
 
@@ -772,7 +866,7 @@ class EntityRelationshipGraph:
                         weight=0.3,
                         spatial_cooccurrence=False,
                         layout_aware_type="page",
-                        source_regions=[],
+                        source_visual_regions=[],
                     )
                     self._add_relationship(rel)
 
@@ -793,7 +887,7 @@ class EntityRelationshipGraph:
                     entity1 = self.entities[table_entities[i]]
                     entity2 = self.entities[table_entities[j]]
 
-                    shared = set(entity1.source_regions).intersection(set(entity2.source_regions))
+                    shared = set(entity1.source_visual_regions).intersection(set(entity2.source_visual_regions))
 
                     if shared:
                         rel = Relationship(
@@ -804,7 +898,7 @@ class EntityRelationshipGraph:
                             weight=0.9,
                             spatial_cooccurrence=True,
                             layout_aware_type="table",
-                            source_regions=list(shared),
+                            source_visual_regions=list(shared),
                         )
                         self._add_relationship(rel)
 
@@ -825,7 +919,7 @@ class EntityRelationshipGraph:
                             weight=0.6,
                             spatial_cooccurrence=False,
                             layout_aware_type="hierarchical",
-                            source_regions=[],
+                            source_visual_regions=[],
                         )
                         self._add_relationship(rel)
 
@@ -841,8 +935,8 @@ class EntityRelationshipGraph:
                 pct_entity = self.entities[pct_eid]
 
                 # Same region = likely related metric
-                shared = set(money_entity.source_regions).intersection(
-                    set(pct_entity.source_regions)
+                shared = set(money_entity.source_visual_regions).intersection(
+                    set(pct_entity.source_visual_regions)
                 )
 
                 if shared:
@@ -854,7 +948,7 @@ class EntityRelationshipGraph:
                         weight=0.85,
                         spatial_cooccurrence=True,
                         layout_aware_type="metric",
-                        source_regions=list(shared),
+                        source_visual_regions=list(shared),
                     )
                     self._add_relationship(rel)
 
@@ -867,8 +961,8 @@ class EntityRelationshipGraph:
             for metric_eid in metric_entities:
                 metric_entity = self.entities[metric_eid]
 
-                shared = set(date_entity.source_regions).intersection(
-                    set(metric_entity.source_regions)
+                shared = set(date_entity.source_visual_regions).intersection(
+                    set(metric_entity.source_visual_regions)
                 )
 
                 if shared:
@@ -880,7 +974,7 @@ class EntityRelationshipGraph:
                         weight=0.7,
                         spatial_cooccurrence=True,
                         layout_aware_type="temporal",
-                        source_regions=list(shared),
+                        source_visual_regions=list(shared),
                     )
                     self._add_relationship(rel)
 
@@ -1096,7 +1190,7 @@ class EntityRelationshipGraph:
                 entity_type=entity_data["entity_type"],
                 value=entity_data["value"],
                 description=entity_data["description"],
-                source_regions=entity_data["source_regions"],
+                source_visual_regions=entity_data["source_visual_regions"],
                 grounding_boxes=entity_data["grounding_boxes"],
                 block_type_context=entity_data["block_type_context"],
                 embedding=None,
@@ -1121,7 +1215,7 @@ class EntityRelationshipGraph:
                 weight=rel_data["weight"],
                 spatial_cooccurrence=rel_data.get("spatial_cooccurrence", False),
                 layout_aware_type=rel_data.get("layout_aware_type", ""),
-                source_regions=rel_data.get("source_regions", []),
+                source_visual_regions=rel_data.get("source_visual_regions", []),
                 evidence_text=rel_data.get("evidence_text", ""),
                 metadata=rel_data.get("metadata", {}),
             )

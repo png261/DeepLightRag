@@ -20,7 +20,7 @@ class EntityProcessor:
 
     def __init__(
         self,
-        model_name: str = "urchade/gliner_base",
+        model_name: str = "fastino/gliner2-base-v1",
         confidence_threshold: float = 0.3,
         enable_visual_grounding: bool = True,
         enable_coreference: bool = True,
@@ -30,7 +30,7 @@ class EntityProcessor:
         Initialize Entity Processor
 
         Args:
-            model_name: GLiNER model name
+            model_name: GLiNER2 model name
             confidence_threshold: Minimum confidence for entity extraction
             enable_visual_grounding: Whether to ground entities visually
             enable_coreference: Whether to resolve coreferences
@@ -44,7 +44,7 @@ class EntityProcessor:
         print("Initializing Entity Processor...")
 
         self.gliner_extractor = GLiNERExtractor(
-            model_name=model_name, confidence_threshold=confidence_threshold, device=device
+            model_name=model_name, device=device
         )
 
         self.ner_pipeline = EnhancedNERPipeline(
@@ -88,19 +88,19 @@ class EntityProcessor:
         print(f"\n🧠 Processing document '{document_id}' for entity extraction")
         print(f"   Pages: {len(ocr_results)}")
 
-        # Collect all regions from all pages
-        all_regions = []
-        total_regions = 0
+        # Collect all visual_regions from all pages
+        all_visual_regions = []
+        total_visual_regions = 0
 
         for page_result in ocr_results:
-            all_regions.extend(page_result.regions)
-            total_regions += len(page_result.regions)
+            all_visual_regions.extend(page_result.visual_regions)
+            total_visual_regions += len(page_result.visual_regions)
 
-        print(f"   Total regions: {total_regions}")
+        print(f"   Total visual_regions: {total_visual_regions}")
 
-        # Process regions for entity extraction
+        # Process visual_regions for entity extraction
         ner_result = self.ner_pipeline.process_document_regions(
-            regions=all_regions, document_id=document_id
+            regions=all_visual_regions, document_id=document_id
         )
 
         # Convert to DeepLightRAG entities
@@ -112,14 +112,15 @@ class EntityProcessor:
             extracted_entities=all_extracted_entities, document_id=document_id
         )
 
-        # Extract relationships
+        # Extract relationships using GLiNER2
         relationships = self.ner_pipeline.extract_entity_relationships(
-            entities=all_extracted_entities, regions=all_regions
+            entities=all_extracted_entities, regions=all_visual_regions, relation_extractor="gliner2"
         )
 
         # Add to entity graph if provided
         if entity_graph:
-            self._add_to_entity_graph(deeplightrag_entities, relationships, entity_graph)
+            self._add_to_entity_graph(
+                deeplightrag_entities, relationships, entity_graph)
 
         # Update statistics
         processing_time = time.time() - start_time
@@ -195,7 +196,8 @@ class EntityProcessor:
         # Group by entity type
         entities_by_type = {}
         for entity_type in entity_types:
-            entities_by_type[entity_type] = [e for e in entities if e.label == entity_type]
+            entities_by_type[entity_type] = [
+                e for e in entities if e.label == entity_type]
 
         return entities_by_type
 
@@ -230,7 +232,8 @@ class EntityProcessor:
         # Update average entities per document
         if self.stats["documents_processed"] > 0:
             self.stats["avg_entities_per_doc"] = (
-                self.stats["total_entities"] / self.stats["documents_processed"]
+                self.stats["total_entities"] /
+                self.stats["documents_processed"]
             )
 
         # Update entity types found
@@ -274,15 +277,18 @@ Performance:
     def get_processing_stats(self) -> Dict[str, Any]:
         """Get processing statistics"""
         stats_copy = self.stats.copy()
-        stats_copy["entity_types_found"] = list(self.stats["entity_types_found"])
+        stats_copy["entity_types_found"] = list(
+            self.stats["entity_types_found"])
 
         # Add derived statistics
         if self.stats["documents_processed"] > 0:
             stats_copy["avg_processing_time"] = (
-                self.stats["processing_time_total"] / self.stats["documents_processed"]
+                self.stats["processing_time_total"] /
+                self.stats["documents_processed"]
             )
             stats_copy["avg_relationships_per_doc"] = (
-                self.stats["total_relationships"] / self.stats["documents_processed"]
+                self.stats["total_relationships"] /
+                self.stats["documents_processed"]
             )
 
         return stats_copy

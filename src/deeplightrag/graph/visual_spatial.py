@@ -23,19 +23,34 @@ class VisualNode:
     position: Tuple[float, float]  # Center position (normalized)
     area: float
     embedding: Optional[np.ndarray] = None
+    entity_ids: List[str] = None  # Cross-layer: entities in this region
 
     def to_dict(self) -> Dict:
-        return {
+        result = {
             "node_id": self.node_id,
             "region_id": self.region.region_id,
             "page_num": self.page_num,
-            "block_type": self.region.block_type,
+            "node_type": self.region.block_type,  # Classified type
+            "block_type": self.region.block_type,  # Keep for compatibility
             "bbox": self.region.bbox.to_list(),
             "position": self.position,
             "area": self.area,
             "text_content": self.region.text_content,
             "token_count": self.region.token_count,
+            # Add image information
+            "image_path": self.region.image_path,
+            "image_format": self.region.image_format,
+            "image_size": self.region.image_size,
+            "extracted_image": self.region.extracted_image,
         }
+        if self.entity_ids:
+            result["entity_ids"] = self.entity_ids
+        if self.embedding is not None:
+            result["embedding"] = self.embedding.tolist()
+        # Include image embedding if available
+        if self.region.image_embedding is not None:
+            result["image_embedding"] = self.region.image_embedding.tolist()
+        return result
 
 
 @dataclass
@@ -87,22 +102,41 @@ class VisualSpatialGraph:
         unique_regions = set()
         skipped_empty = 0
         skipped_duplicates = 0
+        self.total_pages = 0
 
         for page_result in ocr_results:
+            self.total_pages = max(self.total_pages, page_result.page_num + 1)
             page_num = page_result.page_num
             self.page_nodes[page_num] = []
 
-            if not page_result.regions:
+            if not page_result.visual_regions:
                 continue
 
-            for region in page_result.regions:
-                key = (region.text_content.strip(), region.block_type)
-                if not region.text_content.strip():
+            for region in page_result.visual_regions:
+                text = region.text_content.strip()
+                
+                # Skip empty or very short text (increased from 3 to 10)
+                if not text or len(text) < 10:
                     skipped_empty += 1
-                    continue  # skip empty
-                if key in unique_regions:
+                    continue
+                
+                # Assess text quality
+                if not self._is_quality_text(text):
+                    skipped_empty += 1
+                    continue
+                
+                # Check for duplicates (use similarity instead of exact match)
+                is_dup = False
+                for existing_key in unique_regions:
+                    if self._is_similar_text(text, existing_key[0]):
+                        is_dup = True
+                        break
+                
+                if is_dup:
                     skipped_duplicates += 1
-                    continue  # skip duplicate
+                    continue
+                
+                key = (text, region.block_type)
                 unique_regions.add(key)
                 try:
                     node = self._create_node(region, page_num)
@@ -129,6 +163,100 @@ class VisualSpatialGraph:
 
         print(f"Graph built: {len(self.nodes)} nodes, {len(self.edges)} edges")
 
+    def _is_quality_text(self, text: str) -> bool:
+        """
+        Assess if text is of sufficient quality
+        Returns: True if quality is acceptable
+        """
+        if not text or len(text) < 3:
+            return False
+        
+        # Check for excessive repetition (like "\uff09" repeated)
+        unique_chars = len(set(text))
+        if unique_chars < 3:  # Less than 3 unique characters = garbage
+            return False
+        
+        # For very short text, be more lenient
+        if len(text) < 20:
+            return True  # Short text is OK if it passes basic checks
+        
+        # For longer text, check character diversity
+        char_diversity = unique_chars / len(text)
+        if char_diversity < 0.05:  # Less than 5% diversity = repetitive garbage
+            return False
+        
+        return True  # Accept all other text
+    
+    def _is_similar_text(self, text1: str, text2: str, threshold: float = 0.9) -> bool:
+        """
+        Check if two texts are similar (for deduplication)
+        
+        Args:
+            text1, text2: Texts to compare
+            threshold: Similarity threshold (0-1)
+            
+        Returns:
+            True if texts are similar
+        """
+        from difflib import SequenceMatcher
+        
+        # Quick length check
+        if abs(len(text1) - len(text2)) > max(len(text1), len(text2)) * 0.3:
+            return False
+        
+        # Compute similarity
+        sim = SequenceMatcher(None, text1, text2).ratio()
+        return sim > threshold
+    
+    def _classify_node_type(self, region: VisualRegion) -> str:
+        """
+        Classify visual node type based on content and structure
+        Returns: heading, paragraph, list, table, caption, code, or text
+        """
+        text = region.text_content.strip()
+        block_type = region.block_type
+        
+        if not text:
+            return "empty"
+        
+        # Use existing block_type if meaningful
+        if block_type and block_type not in ["text", "unknown", ""]:
+            return block_type
+        
+        # Rule-based classification
+        # 1. Heading detection
+        if len(text) < 100:
+            if text.isupper() and len(text) > 5:
+                return "heading"
+            if text.endswith(':') and len(text) < 50:
+                return "heading"
+        
+        # 2. List detection
+        list_markers = ['•', '◦', '▪', '▫', '‣', '⁃', '-', '*', '→', '➤']
+        if any(text.startswith(marker) for marker in list_markers):
+            return "list"
+        if text.startswith(tuple(f"{i}." for i in range(1, 100))):
+            return "list"
+        
+        # 3. Code detection
+        code_indicators = ['{', '}', '()', '=>', 'function', 'def ', 'class ', 'import ', 'const ']
+        if any(indicator in text for indicator in code_indicators):
+            if len([c for c in text if c in '{}();']) > len(text) * 0.1:
+                return "code"
+        
+        # 4. Caption detection
+        caption_starters = ['Figure', 'Table', 'Fig.', 'Image', 'Chart', 'Diagram']
+        if any(text.startswith(starter) for starter in caption_starters):
+            if len(text) < 200:
+                return "caption"
+        
+        # 5. Paragraph (long text)
+        if len(text) > 200:
+            return "paragraph"
+        
+        # 6. Default
+        return "text"
+    
     def _create_node(self, region: VisualRegion, page_num: int) -> VisualNode:
         """Create a visual node from a region"""
         bbox = region.bbox
@@ -146,6 +274,12 @@ class VisualSpatialGraph:
             node_embedding = np.mean(embeddings, axis=0)
         else:
             node_embedding = None
+        
+        # Classify node type
+        node_type = self._classify_node_type(region)
+        # Update region block_type if it was generic
+        if region.block_type in ["text", "unknown", "", None]:
+            region.block_type = node_type
 
         return VisualNode(
             node_id=region.region_id,
@@ -444,16 +578,29 @@ class VisualSpatialGraph:
                 token_count=node_data["token_count"],
                 confidence=node_data.get("confidence", 1.0),
                 metadata=node_data.get("metadata", {}),
+                # Add image-related fields
+                image_path=node_data.get("image_path"),
+                image_format=node_data.get("image_format", "png"),
+                image_size=tuple(node_data["image_size"]) if node_data.get("image_size") else None,
+                extracted_image=node_data.get("extracted_image", False),
             )
 
+            # Load image embedding if available
+            if "image_embedding" in node_data and node_data["image_embedding"]:
+                region.image_embedding = np.array(node_data["image_embedding"])
+
             # Create VisualNode
+            embedding = None
+            if "embedding" in node_data and node_data["embedding"]:
+                embedding = np.array(node_data["embedding"])
+            
             node = VisualNode(
                 node_id=node_data["node_id"],
                 region=region,
                 page_num=node_data["page_num"],
                 position=tuple(node_data["position"]),
                 area=node_data["area"],
-                embedding=None,
+                embedding=embedding,
             )
 
             self.nodes[node.node_id] = node

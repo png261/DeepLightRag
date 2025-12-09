@@ -35,9 +35,17 @@ class DualLayerGraph:
         )
 
         # Cross-layer mappings
-        self.entity_to_regions: Dict[str, List[str]] = {}  # Entity → Visual Regions
-        self.region_to_entities: Dict[str, List[str]] = {}  # Visual Region → Entities
+        # Entity → Visual Regions
+        self.entity_to_regions: Dict[str, List[str]] = {}
+        # Visual Region → Entities
+        self.region_to_entities: Dict[str, List[str]] = {}
         self.figure_caption_links: Dict[str, str] = {}  # Figure ↔ Caption
+
+        # Image mappings
+        # Image path → Entities
+        self.image_to_entities: Dict[str, List[str]] = {}
+        # Entity ID → Image paths
+        self.entity_to_images: Dict[str, List[str]] = {}
 
     def build_from_ocr_results(self, ocr_results: List[PageOCRResult]):
         """
@@ -76,13 +84,17 @@ class DualLayerGraph:
 
         for entity_id, entity in self.entity_relationship.entities.items():
             # Filter to only valid regions
-            valid_regions = [rid for rid in entity.source_regions if rid in valid_region_ids]
+            valid_regions = [
+                rid for rid in entity.source_visual_regions if rid in valid_region_ids]
 
-            if not valid_regions and entity.source_regions:
+            if not valid_regions and entity.source_visual_regions:
                 entities_with_missing_regions += 1
                 # Use first source region if available, fallback to empty list
                 valid_regions = []
 
+            # Update entity object with cleaned region list
+            entity.source_visual_regions = valid_regions
+            
             self.entity_to_regions[entity_id] = valid_regions
 
             # Update reverse mapping only for valid regions
@@ -97,6 +109,11 @@ class DualLayerGraph:
                 f"  - Warning: {entities_with_missing_regions} entities had missing region references"
             )
 
+        # Update visual nodes with entity references
+        for region_id, entity_ids in self.region_to_entities.items():
+            if region_id in self.visual_spatial.nodes:
+                self.visual_spatial.nodes[region_id].entity_ids = entity_ids
+
         # 2. Figure ↔ Caption links
         print("  - Linking Figures with Captions...")
         try:
@@ -104,9 +121,17 @@ class DualLayerGraph:
         except Exception as e:
             print(f"  - Warning: Failed to link figures with captions: {e}")
 
+        # 3. Build Image ↔ Entity mappings
+        print("  - Building Image ↔ Entity mappings...")
+        try:
+            self._build_image_connections()
+        except Exception as e:
+            print(f"  - Warning: Failed to build image connections: {e}")
+
         print(f"  - Created {len(self.entity_to_regions)} entity→region mappings")
         print(f"  - Created {len(self.region_to_entities)} region→entity mappings")
         print(f"  - Created {len(self.figure_caption_links)} figure↔caption links")
+        print(f"  - Created {len(self.image_to_entities)} image→entity mappings")
 
     def _link_figures_captions(self):
         """Link figure nodes with their captions"""
@@ -140,6 +165,53 @@ class DualLayerGraph:
 
                 if best_caption:
                     self.figure_caption_links[figure.node_id] = best_caption.node_id
+
+    def _build_image_connections(self):
+        """Connect extracted images to relevant entities"""
+        for node_id, node in self.visual_spatial.nodes.items():
+            image_path = node.region.image_path
+
+            if image_path and node.region.extracted_image:
+                # Get entities in this region
+                entity_ids = self.region_to_entities.get(node_id, [])
+
+                if entity_ids:
+                    # Map image to entities in the same region
+                    self.image_to_entities[image_path] = entity_ids
+
+                    # Create reverse mapping
+                    for entity_id in entity_ids:
+                        if entity_id not in self.entity_to_images:
+                            self.entity_to_images[entity_id] = []
+                        if image_path not in self.entity_to_images[entity_id]:
+                            self.entity_to_images[entity_id].append(image_path)
+
+                # Also check nearby regions for entities (within same page)
+                elif node.page_num in self.visual_spatial.page_nodes:
+                    nearby_region_ids = self.visual_spatial.page_nodes[node.page_num]
+                    nearby_entities = []
+
+                    # Find entities in regions with similar y-coordinate (captions, labels)
+                    for nearby_region_id in nearby_region_ids:
+                        if nearby_region_id == node_id:
+                            continue
+
+                        nearby_node = self.visual_spatial.nodes[nearby_region_id]
+                        y_distance = abs(nearby_node.position[1] - node.position[1])
+
+                        # Consider regions close vertically (within 15% of page height)
+                        if y_distance < 0.15:
+                            nearby_entities.extend(
+                                self.region_to_entities.get(nearby_region_id, [])
+                            )
+
+                    if nearby_entities:
+                        self.image_to_entities[image_path] = list(set(nearby_entities))
+                        for entity_id in nearby_entities:
+                            if entity_id not in self.entity_to_images:
+                                self.entity_to_images[entity_id] = []
+                            if image_path not in self.entity_to_images[entity_id]:
+                                self.entity_to_images[entity_id].append(image_path)
 
     def get_visual_regions_for_entity(self, entity_id: str) -> List[VisualNode]:
         """Get visual regions where an entity appears"""
@@ -178,7 +250,8 @@ class DualLayerGraph:
         Returns:
             Combined results from both layers
         """
-        results = {"entities": set(), "regions": set(), "relationships": [], "spatial_edges": []}
+        results = {"entities": set(), "regions": set(
+        ), "relationships": [], "spatial_edges": []}
 
         # Expand from entities
         for entity_id in query_entities:
@@ -197,7 +270,8 @@ class DualLayerGraph:
         # Expand from regions
         for region_id in query_regions:
             # Get adjacent regions
-            neighbors = self.visual_spatial.get_neighbors(region_id, hop_distance=hop_distance)
+            neighbors = self.visual_spatial.get_neighbors(
+                region_id, hop_distance=hop_distance)
             results["regions"].update(neighbors)
             results["regions"].add(region_id)
 
@@ -244,7 +318,8 @@ class DualLayerGraph:
             Context string with structured information
         """
         # Search entities
-        relevant_entities = self.entity_relationship.search_entities(query, top_k=10)
+        relevant_entities = self.entity_relationship.search_entities(
+            query, top_k=10)
 
         # Build context
         context_parts = []
@@ -261,9 +336,11 @@ class DualLayerGraph:
                 entity.entity_id, hop_distance=1
             )
             for related_id in related[:3]:
-                related_entity = self.entity_relationship.get_entity(related_id)
+                related_entity = self.entity_relationship.get_entity(
+                    related_id)
                 if related_entity:
-                    context_parts.append(f"  - Related: {related_entity.name}\n")
+                    context_parts.append(
+                        f"  - Related: {related_entity.name}\n")
 
         # Add visual region context
         context_parts.append("\n## Source Regions\n")
@@ -315,11 +392,14 @@ class DualLayerGraph:
         print(f"  - Figure↔Caption: {len(self.figure_caption_links)}")
 
         # Token summary
-        total_tokens = sum(node.region.token_count for node in self.visual_spatial.nodes.values())
+        total_tokens = sum(
+            node.region.token_count for node in self.visual_spatial.nodes.values())
         print(f"\nToken Summary:")
         print(f"  - Total Compressed Tokens: {total_tokens}")
-        print(f"  - Estimated Original (2500/page): {vs_stats['num_pages'] * 2500}")
-        compression = (vs_stats["num_pages"] * 2500) / total_tokens if total_tokens > 0 else 0
+        print(
+            f"  - Estimated Original (2500/page): {vs_stats['num_pages'] * 2500}")
+        compression = (vs_stats["num_pages"] * 2500) / \
+            total_tokens if total_tokens > 0 else 0
         print(f"  - Compression Ratio: {compression:.1f}x")
 
     def save(self, directory: str):
@@ -329,10 +409,12 @@ class DualLayerGraph:
         os.makedirs(directory, exist_ok=True)
 
         # Save Layer 1
-        self.visual_spatial.save(os.path.join(directory, "visual_spatial.json"))
+        self.visual_spatial.save(os.path.join(
+            directory, "visual_spatial.json"))
 
         # Save Layer 2
-        self.entity_relationship.save(os.path.join(directory, "entity_relationship.json"))
+        self.entity_relationship.save(os.path.join(
+            directory, "entity_relationship.json"))
 
         # Save cross-layer connections
         cross_layer_data = {
@@ -357,7 +439,8 @@ class DualLayerGraph:
             print(f"Warning: visual_spatial.json not found in {directory}")
 
         # Load Layer 2: Entity-Relationship Graph
-        entity_relationship_path = os.path.join(directory, "entity_relationship.json")
+        entity_relationship_path = os.path.join(
+            directory, "entity_relationship.json")
         if os.path.exists(entity_relationship_path):
             self.entity_relationship.load(entity_relationship_path)
         else:

@@ -34,7 +34,7 @@ jobs:
     - name: Install MLX (macOS only)
       if: runner.os == 'macOS'
       run: |
-        pip install mlx mlx-lm mlx-vlm || echo "MLX installation failed, will use PyTorch"
+        pip install mlx mlx-lm || echo "MLX installation failed, will use PyTorch"
     
     - name: Test imports
       run: |

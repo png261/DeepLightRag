@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deeplightrag"
-version = "1.0.0"
+version = "1.0.14"
 description = "DeepLightRAG: High-performance Document Indexing and Retrieval System (use with any LLM)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -60,19 +60,22 @@ dependencies = [
     # PDF Processing
     "pdf2image>=1.16.0",
     "PyMuPDF>=1.23.0",
+    "easyocr>=1.7.0",
     
     # ML/AI Core
     "torch>=2.0.0",
     "torchvision>=0.15.0",
-    "transformers>=4.40.0",
+    "transformers>=4.40.0,<4.47.0",
     "accelerate>=0.24.0",
     "sentence-transformers>=2.2.0",
+    "setfit>=1.0.0",
     
     # NER and Relation Extraction
     "gliner>=0.1.12",
     
     # Vector Storage
     "faiss-cpu>=1.7.4",
+    "toon-python>=0.1.2",
 ]
 
 [project.optional-dependencies]
@@ -85,7 +88,7 @@ gpu = [
 macos = [
     "mlx>=0.21.0",
     "mlx-lm>=0.19.0",
-    "mlx-vlm>=0.0.12",
+    "mlx-vlm>=0.0.3",
 ]
 
 # LLM providers (optional - use if you want built-in generation)

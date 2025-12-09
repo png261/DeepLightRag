@@ -1,26 +1,17 @@
 """
 NER Module for DeepLightRAG
-Advanced Named Entity Recognition with GLiNER
+Pure GLiNER2 Unified Entity and Relation Extraction
 """
 
-from .gliner_ner import GLiNERExtractor, DeepLightRAGEntitySchema
+from .gliner_ner import GLiNERExtractor, ExtractedEntity
 from .enhanced_ner_pipeline import EnhancedNERPipeline
 from .entity_processor import EntityProcessor
-from .relation_extractor import (
-    OpenNREExtractor,
-    RelationExtractionPipeline,
-    DeepLightRAGRelationSchema,
-)
-from .deberta_relation_extractor import DeBERTaRelationExtractor, ACE05TACREDRelationSchema
+from .entity_schema import EntitySchema
 
 __all__ = [
     "GLiNERExtractor",
-    "DeepLightRAGEntitySchema",
+    "ExtractedEntity",
+    "EntitySchema",
     "EnhancedNERPipeline",
     "EntityProcessor",
-    "OpenNREExtractor",
-    "RelationExtractionPipeline",
-    "DeepLightRAGRelationSchema",
-    "DeBERTaRelationExtractor",
-    "ACE05TACREDRelationSchema",
 ]

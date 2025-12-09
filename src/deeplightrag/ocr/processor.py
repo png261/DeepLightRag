@@ -205,6 +205,22 @@ class PDFProcessor:
         print(f"Total pages: {total_pages}")
         print(f"Processing pages {start_page} to {end_page}")
 
+        # Cache PDF pages for direct text extraction (hybrid approach)
+        try:
+            if HAS_PYMUPDF:
+                import fitz
+                doc = fitz.open(pdf_path)
+                self.ocr_model._pdf_page_text = {}
+                for i in range(start_page, end_page):
+                    page = doc[i]
+                    self.ocr_model._pdf_page_text[i] = {
+                        'page': page,
+                        'width': page.rect.width,
+                        'height': page.rect.height
+                    }
+        except Exception as e:
+            print(f"⚠️ Could not cache PDF text: {e}")
+
         results = []
         batch_images = []
         batch_start_page = start_page
@@ -249,6 +265,8 @@ class PDFProcessor:
                 except Exception as e:
                     processing_errors += 1
                     print(f"Warning: Failed to process final batch: {e}")
+                    import traceback
+                    traceback.print_exc()
 
         except Exception as e:
             print(f"Error during PDF processing: {e}")

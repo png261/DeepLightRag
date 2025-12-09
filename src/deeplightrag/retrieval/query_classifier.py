@@ -1,11 +1,16 @@
 """
 Query Classification for Adaptive Retrieval
-Classifies queries into 4 levels based on complexity
+Classifies queries into 4 levels based on complexity using SetFit
 """
 
-import re
+import logging
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, Optional
+
+from setfit import SetFitModel
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -22,13 +27,26 @@ class QueryLevel:
 
 class QueryClassifier:
     """
-    Adaptive Query Routing
-    Classifies queries into 4 complexity levels
+    SetFit-based Query Classification
+    Classifies queries into 4 complexity levels using few-shot learning
     """
 
-    def __init__(self):
+    def __init__(self, model_name: str = "sentence-transformers/paraphrase-mpnet-base-v2", device: str = "cpu", model_save_path: Optional[str] = None):
+        """
+        Initialize SetFit classifier
+        
+        Args:
+            model_name: Base sentence transformer model
+            device: Device to run model on (cpu, cuda, mps)
+            model_save_path: Path to load/save the trained model
+        """
+        self.device = device
+        self.model_name = model_name
+        self.model_save_path = model_save_path or "./setfit_query_classifier_save"
+        self.model: Optional[SetFitModel] = None
+        
         self.levels = {
-            1: QueryLevel(
+            0: QueryLevel(
                 level=1,
                 name="simple",
                 max_tokens=2000,
@@ -36,7 +54,7 @@ class QueryClassifier:
                 strategy="entity_lookup",
                 description="Simple factual queries",
             ),
-            2: QueryLevel(
+            1: QueryLevel(
                 level=2,
                 name="complex",
                 max_tokens=6000,
@@ -44,7 +62,7 @@ class QueryClassifier:
                 strategy="hybrid",
                 description="Complex reasoning queries",
             ),
-            3: QueryLevel(
+            2: QueryLevel(
                 level=3,
                 name="multi_doc",
                 max_tokens=10000,
@@ -52,7 +70,7 @@ class QueryClassifier:
                 strategy="hierarchical",
                 description="Multi-document synthesis",
             ),
-            4: QueryLevel(
+            3: QueryLevel(
                 level=4,
                 name="visual",
                 max_tokens=12000,
@@ -61,68 +79,113 @@ class QueryClassifier:
                 description="Visual-semantic fusion queries",
             ),
         }
+        
+        self._initialize_model()
+    
+    def _initialize_model(self):
+        """Initialize or train SetFit model with few-shot examples"""
+        import os
+        
+        try:
+            from datasets import Dataset
+            from setfit import Trainer, TrainingArguments
+            
+            # Check if saved model exists
+            if os.path.exists(self.model_save_path) and os.path.isdir(self.model_save_path):
+                try:
+                    self.model = SetFitModel.from_pretrained(self.model_save_path)
+                    logger.info(f"Loaded existing SetFit classifier from {self.model_save_path}")
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to load saved model, retraining: {e}")
 
-        # Keywords for classification
-        self.visual_keywords = [
-            "chart",
-            "figure",
-            "table",
-            "image",
-            "diagram",
-            "graph",
-            "plot",
-            "visualization",
-            "picture",
-            "photo",
-            "page",
-            "show",
-            "display",
-            "look",
-            "see",
+            # Create dataset with training examples
+            train_examples = self._get_training_examples()
+            train_dataset = Dataset.from_dict({
+                "text": [ex[0] for ex in train_examples],
+                "label": [ex[1] for ex in train_examples]
+            })
+            
+            # Initialize SetFit model
+            self.model = SetFitModel.from_pretrained(
+                self.model_name,
+                labels=["simple", "complex", "multi_doc", "visual"]
+            )
+            logger.info(f"Loaded base SetFit model: {self.model_name}")
+            
+            # Train with few-shot examples
+            args = TrainingArguments(
+                num_epochs=1,
+                batch_size=8,
+                show_progress_bar=False,
+                output_dir="./setfit_training_output" # Temporary output
+            )
+            
+            trainer = Trainer(
+                model=self.model,
+                args=args,
+                train_dataset=train_dataset
+            )
+            
+            trainer.train()
+            logger.info("Trained SetFit classifier with few-shot examples")
+            
+            # Save the model
+            self.model.save_pretrained(self.model_save_path)
+            logger.info(f"Saved trained classifier to {self.model_save_path}")
+                
+        except Exception as e:
+            logger.warning(f"Failed to initialize SetFit model: {e}")
+            self.model = None
+    
+    def _get_training_examples(self):
+        """Get few-shot training examples for each query level"""
+        examples = [
+            # Level 0: Simple factual queries
+            ("What is the main topic?", 0),
+            ("Who is the author?", 0),
+            ("Define the term", 0),
+            ("When was this published?", 0),
+            ("List the key points", 0),
+            ("What are the main entities?", 0),
+            ("Which method is used?", 0),
+            ("Name the components", 0),
+            
+            # Level 1: Complex reasoning queries  
+            ("Why does this approach work better?", 1),
+            ("How do these components interact?", 1),
+            ("Explain the relationship between X and Y", 1),
+            ("Analyze the impact of this decision", 1),
+            ("What causes this effect?", 1),
+            ("How does the architecture achieve performance?", 1),
+            ("Explain the reasoning behind this design", 1),
+            ("What is the correlation between these factors?", 1),
+            
+            # Level 2: Multi-document synthesis
+            ("Compare approach A versus approach B", 2),
+            ("What are the differences between these methods?", 2),
+            ("Summarize all the experiments", 2),
+            ("How do multiple papers address this problem?", 2),
+            ("Compare the results across all studies", 2),
+            ("What patterns emerge across the documents?", 2),
+            ("Synthesize findings from all sections", 2),
+            ("Contrast different architectures presented", 2),
+            
+            # Level 3: Visual-semantic fusion
+            ("What does Figure 1 show?", 3),
+            ("Describe the chart on page 5", 3),
+            ("Explain the diagram", 3),
+            ("What is shown in the table?", 3),
+            ("Analyze the visualization", 3),
+            ("What trends appear in the plot?", 3),
+            ("Describe the image layout", 3),
+            ("What is displayed in the screenshot?", 3),
         ]
-
-        self.comparison_keywords = [
-            "compare",
-            "versus",
-            "vs",
-            "difference",
-            "between",
-            "contrast",
-            "similar",
-            "different",
-            "both",
-            "multiple",
-        ]
-
-        self.reasoning_keywords = [
-            "why",
-            "how",
-            "explain",
-            "analyze",
-            "because",
-            "correlate",
-            "relationship",
-            "impact",
-            "effect",
-            "cause",
-        ]
-
-        self.simple_keywords = [
-            "what",
-            "which",
-            "when",
-            "where",
-            "who",
-            "name",
-            "list",
-            "define",
-            "is",
-            "are",
-        ]
+        return examples
 
     def classify(self, query: str) -> QueryLevel:
         """
-        Classify query into complexity level
+        Classify query into complexity level using SetFit
 
         Args:
             query: User query string
@@ -130,91 +193,24 @@ class QueryClassifier:
         Returns:
             QueryLevel with appropriate settings
         """
-        query_lower = query.lower()
-
-        # Check for visual queries (Level 4)
-        if self._is_visual_query(query_lower):
-            return self.levels[4]
-
-        # Check for multi-document queries (Level 3)
-        if self._is_multi_doc_query(query_lower):
-            return self.levels[3]
-
-        # Check for complex reasoning (Level 2)
-        if self._is_complex_query(query_lower):
-            return self.levels[2]
-
-        # Default to simple factual (Level 1)
-        return self.levels[1]
-
-    def _is_visual_query(self, query: str) -> bool:
-        """Check if query requires visual information"""
-        # Check for visual keywords
-        for keyword in self.visual_keywords:
-            if keyword in query:
-                return True
-
-        # Check for page references
-        if re.search(r"page\s+\d+", query):
-            return True
-
-        # Check for specific visual references
-        if re.search(r"figure\s+\d+", query):
-            return True
-
-        if re.search(r"table\s+\d+", query):
-            return True
-
-        return False
-
-    def _is_multi_doc_query(self, query: str) -> bool:
-        """Check if query requires multi-document analysis"""
-        # Check for comparison keywords
-        comparison_count = sum(1 for keyword in self.comparison_keywords if keyword in query)
-        if comparison_count >= 2:
-            return True
-
-        # Check for multiple entity mentions
-        # Crude heuristic: multiple capitalized words
-        capitalized = re.findall(r"\b[A-Z][a-z]+\b", query)
-        if len(capitalized) >= 3:
-            return True
-
-        # Check for aggregation terms
-        aggregation_terms = ["all", "every", "each", "across", "throughout", "summary"]
-        for term in aggregation_terms:
-            if term in query:
-                return True
-
-        return False
-
-    def _is_complex_query(self, query: str) -> bool:
-        """Check if query requires complex reasoning"""
-        # Check for reasoning keywords
-        for keyword in self.reasoning_keywords:
-            if keyword in query:
-                return True
-
-        # Check query length (longer = more complex)
-        word_count = len(query.split())
-        if word_count > 15:
-            return True
-
-        # Check for multiple questions
-        if query.count("?") > 1:
-            return True
-
-        # Check for conditional phrases
-        conditional_patterns = [
-            r"\bif\b.*\bthen\b",
-            r"\bwhen\b.*\bhow\b",
-            r"\bwhat\b.*\band\b.*\bwhy\b",
-        ]
-        for pattern in conditional_patterns:
-            if re.search(pattern, query, re.IGNORECASE):
-                return True
-
-        return False
+        if self.model is None:
+            logger.warning("SetFit model not initialized, using simple fallback")
+            return self.levels[0]  # Default to simple
+        
+        try:
+            # Predict using SetFit
+            prediction = self.model.predict([query])[0]
+            
+            # Map string labels to indices if needed
+            if isinstance(prediction, str):
+                label_map = {"simple": 0, "complex": 1, "multi_doc": 2, "visual": 3}
+                prediction = label_map.get(prediction, 0)
+            
+            return self.levels[int(prediction)]
+            
+        except Exception as e:
+            logger.error(f"Error during classification: {e}")
+            return self.levels[0]  # Fallback to simple
 
     def get_strategy_description(self, level: int) -> str:
         """Get description of retrieval strategy for a level"""
@@ -234,11 +230,15 @@ class QueryClassifier:
             Dictionary with classification details
         """
         level = self.classify(query)
-
-        # Count keyword matches
-        visual_matches = [kw for kw in self.visual_keywords if kw in query.lower()]
-        reasoning_matches = [kw for kw in self.reasoning_keywords if kw in query.lower()]
-        comparison_matches = [kw for kw in self.comparison_keywords if kw in query.lower()]
+        
+        # Get prediction confidence if available
+        confidence = None
+        if self.model is not None:
+            try:
+                probs = self.model.predict_proba([query])[0]
+                confidence = float(max(probs))
+            except:
+                pass
 
         return {
             "query": query,
@@ -248,9 +248,8 @@ class QueryClassifier:
             "max_nodes": level.max_nodes,
             "strategy": level.strategy,
             "description": level.description,
-            "visual_keywords_found": visual_matches,
-            "reasoning_keywords_found": reasoning_matches,
-            "comparison_keywords_found": comparison_matches,
+            "confidence": confidence,
             "word_count": len(query.split()),
+            "model": "SetFit" if self.model else "Fallback",
             "token_budget": f"{level.max_tokens} tokens (vs 30K fixed in LightRAG)",
         }

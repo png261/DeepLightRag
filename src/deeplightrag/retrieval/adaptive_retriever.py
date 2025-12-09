@@ -10,8 +10,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    print("Warning: scikit-learn not found. Hybrid search will be disabled.")
+
 from ..graph.dual_layer import DualLayerGraph
 from .query_classifier import QueryClassifier, QueryLevel
+from ..utils.component_factory import component_factory
 
 
 @dataclass
@@ -86,6 +94,8 @@ class RetrievedRegion:
     relevance_score: float
     bbox: List[float]
     entities_in_region: List[str]  # Entity IDs found in this region
+    retrieval_method: str = "entity"  # 'entity', 'text', 'visual'
+    image_path: Optional[str] = None  # Path to extracted image
 
     def to_dict(self) -> Dict:
         return {
@@ -97,6 +107,8 @@ class RetrievedRegion:
             "relevance_score": self.relevance_score,
             "bbox": self.bbox,
             "entities_in_region": self.entities_in_region,
+            "retrieval_method": self.retrieval_method,
+            "image_path": self.image_path,
         }
 
 
@@ -107,7 +119,7 @@ class AdaptiveRetriever:
     """
 
     def __init__(
-        self, dual_layer_graph: DualLayerGraph, query_classifier: Optional[QueryClassifier] = None
+        self, dual_layer_graph: DualLayerGraph, query_classifier: Optional[QueryClassifier] = None, config: Optional[Dict] = None
     ):
         """
         Initialize retriever
@@ -115,9 +127,48 @@ class AdaptiveRetriever:
         Args:
             dual_layer_graph: Dual-layer graph to retrieve from
             query_classifier: Query classifier instance
+            config: Configuration dictionary for factory
         """
         self.graph = dual_layer_graph
         self.classifier = query_classifier or QueryClassifier()
+        self.config = config or {}
+        
+        # Initialize Formatter via Factory
+        # This allows swapping Toon/JSON/Markdown formatters
+        self.formatter = component_factory.create_formatter(self.config)
+        
+        # Initialize TF-IDF index for hybrid search
+        self.vectorizer = None
+        self.tfidf_matrix = None
+        self.doc_ids = []
+        self._build_text_index()
+
+    def _build_text_index(self):
+        """Build TF-IDF index from graph regions"""
+        if not SKLEARN_AVAILABLE:
+            return
+
+        documents = []
+        self.doc_ids = []
+
+        for region_id, node in self.graph.visual_spatial.nodes.items():
+            if node.region.text_content and len(node.region.text_content.strip()) > 10:
+                documents.append(node.region.text_content)
+                self.doc_ids.append(region_id)
+        
+        if documents:
+            try:
+                # Limit features to keep it fast and light
+                self.vectorizer = TfidfVectorizer(
+                    stop_words='english', 
+                    max_features=5000,
+                    ngram_range=(1, 2)
+                )
+                self.tfidf_matrix = self.vectorizer.fit_transform(documents)
+                print(f"  ✅ Built TF-IDF index with {len(documents)} documents")
+            except Exception as e:
+                print(f"Warning: Failed to build TF-IDF index: {e}")
+                self.vectorizer = None
 
     def retrieve(self, query: str, override_level: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -230,15 +281,20 @@ class AdaptiveRetriever:
             retrieved_entities.append(retrieved)
             entity_ids.add(entity.entity_id)
 
-        # Find relationships between these entities
+        # Find relationships involving these entities
         retrieved_relationships = []
-        if include_relationships:
+        if include_relationships and entity_ids:
             for rel in self.graph.entity_relationship.relationships:
-                if rel.source_entity in entity_ids and rel.target_entity in entity_ids:
+                # Include relationship if at least one entity is in our set
+                if rel.source_entity in entity_ids or rel.target_entity in entity_ids:
                     source = self.graph.entity_relationship.get_entity(rel.source_entity)
                     target = self.graph.entity_relationship.get_entity(rel.target_entity)
 
                     if source and target:
+                        # Prioritize relationships where both entities are in set
+                        both_in_set = (rel.source_entity in entity_ids and rel.target_entity in entity_ids)
+                        relevance = rel.weight * (1.0 if both_in_set else 0.7)
+                        
                         retrieved_rel = RetrievedRelationship(
                             source_entity=rel.source_entity,
                             target_entity=rel.target_entity,
@@ -249,9 +305,13 @@ class AdaptiveRetriever:
                             weight=rel.weight,
                             evidence_text=rel.evidence_text,
                             spatial_cooccurrence=rel.spatial_cooccurrence,
-                            relevance_score=rel.weight,
+                            relevance_score=relevance,
                         )
                         retrieved_relationships.append(retrieved_rel)
+            
+            # Sort by relevance and limit
+            retrieved_relationships.sort(key=lambda r: r.relevance_score, reverse=True)
+            retrieved_relationships = retrieved_relationships[:20]  # Limit to top 20
 
         return retrieved_entities, retrieved_relationships
 
@@ -314,27 +374,145 @@ class AdaptiveRetriever:
                 relevance_score=relevance,
                 bbox=region.bbox.to_list(),
                 entities_in_region=entities_ids,
+                retrieval_method="entity",
+                image_path=region.image_path if hasattr(region, "image_path") else None,
             )
             retrieved_regions.append(retrieved)
 
         return retrieved_regions
+        
+    def _search_text_tfidf(self, query: str, max_results: int = 5) -> List[RetrievedRegion]:
+        """Search regions using TF-IDF sparse vector retrieval"""
+        if self.vectorizer is None or self.tfidf_matrix is None:
+            return []
+            
+        try:
+            query_vec = self.vectorizer.transform([query])
+            
+            # Compute similarity
+            similarity_scores = (self.tfidf_matrix * query_vec.T).toarray().flatten()
+            
+            # Get top indices
+            # Only consider scores > 0
+            relevant_indices = np.where(similarity_scores > 0.05)[0]
+            if len(relevant_indices) == 0:
+                return []
+                
+            # Sort indices by score
+            sorted_indices = relevant_indices[np.argsort(similarity_scores[relevant_indices])[::-1]]
+            top_indices = sorted_indices[:max_results]
+            
+            retrieved_regions = []
+            for idx in top_indices:
+                region_id = self.doc_ids[idx]
+                if region_id in self.graph.visual_spatial.nodes:
+                    node = self.graph.visual_spatial.nodes[region_id]
+                    region = node.region
+                    entities_in_region = [
+                        e.entity_id for e in self.graph.get_entities_in_region(region_id)
+                    ]
+                    
+                    retrieved = RetrievedRegion(
+                        region_id=region.region_id,
+                        page_num=node.page_num,
+                        block_type=region.block_type,
+                        text_content=region.text_content,
+                        markdown_content=region.markdown_content,
+                        relevance_score=float(similarity_scores[idx]),
+                        bbox=region.bbox.to_list(),
+                        entities_in_region=entities_in_region,
+                        retrieval_method="text_tfidf",
+                        image_path=region.image_path if hasattr(region, "image_path") else None,
+                    )
+                    retrieved_regions.append(retrieved)
+                    
+            return retrieved_regions
+            
+        except Exception as e:
+            print(f"Error in TF-IDF search: {e}")
+            return []
+
+    def _generate_context(self, result: Dict[str, Any], level: QueryLevel) -> str:
+        """Generate formatted context string using configured formatter"""
+        if level.level == 1:
+            return self.formatter.format_simple_context(result)
+        else:
+            return self.formatter.format_retrieval_result(result)
 
     def _entity_lookup(self, query: str, level: QueryLevel) -> Dict[str, Any]:
         """
-        Level 1: Simple entity lookup
+        Level 1: Simple entity lookup (Hybrid with fallbacks)
 
         Fast retrieval for factual queries
-        Fallback to visual regions if no entities found
-        Enhanced with structured output and ranking
         """
-        # Search for relevant entities with ranking
+        # 1. Search for relevant entities with ranking
         entities, relationships = self._search_entities_with_ranking(
-            query, level.max_nodes, include_relationships=False
+            query, level.max_nodes, include_relationships=True
         )
+
+        # 2. Get regions for these entities
+        entity_ids = set(e.entity_id for e in entities) if entities else None
+        
+        if entities:
+            # Use entity-driven region search
+            regions = self._search_regions_with_ranking(query, min(3, level.max_nodes), entity_ids)
+        else:
+            regions = []
+
+        # 3. Fallback: If minimal entities/regions found, use TF-IDF
+        use_fallback = not entities or len(regions) == 0
+        if use_fallback:
+            print("  ℹ️ Entity search yielded low results, trying Hybrid text search...")
+            text_regions = self._search_text_tfidf(query, max_results=5)
+            
+            # Deduplicate regions
+            existing_ids = {r.region_id for r in regions}
+            for tr in text_regions:
+                if tr.region_id not in existing_ids:
+                    regions.append(tr)
+                    existing_ids.add(tr.region_id)
+            
+            # If we found regions via text, try to extract relevant entities from them to populate context
+            if text_regions and not entities:
+                for region in text_regions:
+                    if region.entities_in_region:
+                        for eid in region.entities_in_region:
+                            # Add these entities to the result if we have room
+                            if len(entities) < 5:
+                                e_obj = self.graph.entity_relationship.get_entity(eid)
+                                if e_obj:
+                                    # Create partial retrieved entity
+                                    retrieved = RetrievedEntity(
+                                        entity_id=e_obj.entity_id,
+                                        name=e_obj.name,
+                                        entity_type=e_obj.entity_type,
+                                        value=e_obj.value,
+                                        description=e_obj.description,
+                                        confidence=e_obj.confidence,
+                                        mention_count=e_obj.mention_count,
+                                        page_numbers=e_obj.page_numbers,
+                                        relevance_score=0.5, # Lower confidence as inferred from region
+                                        is_initial=False,
+                                    )
+                                    # Ensure unique
+                                    if not any(e.entity_id == retrieved.entity_id for e in entities):
+                                        entities.append(retrieved)
 
         # Build context
         context_parts = []
         total_tokens = 0
+
+        # If STILL no entities/regions, return empty
+        if not entities and not regions:
+            return {
+                "context": "",
+                "entities": [],
+                "relationships": [],
+                "regions": [],
+                "token_count": 0,
+                "nodes_retrieved": 0,
+                "error": "No relevant entities or text found for query"
+            }
 
         if entities:
             # Use entity-based context with better formatting
@@ -345,27 +523,60 @@ class AdaptiveRetriever:
                     f"- Value: {entity.value}\n"
                     f"- Description: {entity.description}\n"
                     f"- Confidence: {entity.confidence:.1%}\n"
-                    f"- Mentions: {entity.mention_count}\n\n"
+                    f"- Mentions: {entity.mention_count}\n"
+                    f"- Pages: {', '.join(map(str, entity.page_numbers))}\n\n"
                 )
                 context_parts.append(entity_context)
                 total_tokens += len(entity_context) // 4
 
                 if total_tokens >= level.max_tokens:
                     break
-
-            # Get regions for these entities
-            entity_ids = set(e.entity_id for e in entities)
-            regions = self._search_regions_with_ranking(query, min(3, level.max_nodes), entity_ids)
-        else:
-            # Fallback: search visual regions directly
-            context_parts.append("## Source Content\n\n")
-            regions = self._search_regions_with_ranking(query, level.max_nodes)
-
-            for region in regions:
-                region_text = (
-                    f"[{region.block_type}] (Page {region.page_num}): "
-                    f"{region.text_content[:200]}...\n\n"
+        
+        # Add relationships if available
+        if relationships and total_tokens < level.max_tokens:
+            context_parts.append("\n## Entity Relationships\n\n")
+            for rel in relationships[:10]:  # Limit to top 10 relationships
+                rel_text = (
+                    f"- **{rel.source_name}** → _{rel.relationship_type}_ → **{rel.target_name}**\n"
                 )
+                if rel.description and rel.description != rel.relationship_type:
+                    rel_text += f"  {rel.description}\n"
+                context_parts.append(rel_text)
+                total_tokens += len(rel_text) // 4
+                
+                if total_tokens >= level.max_tokens:
+                    break
+            context_parts.append("\n")
+        
+        # Add region content with visual-spatial information
+        if regions and total_tokens < level.max_tokens:
+            context_parts.append("\n## Document Content & Visual Layout\n\n")
+            for region in regions:
+                # Include spatial information
+                bbox_str = f"[x:{region.bbox[0]:.0f}, y:{region.bbox[1]:.0f}, w:{region.bbox[2]-region.bbox[0]:.0f}, h:{region.bbox[3]-region.bbox[1]:.0f}]"
+                
+                source_marker = " (Text Match)" if region.retrieval_method == "text_tfidf" else ""
+                
+                region_text = (
+                    f"**[{region.block_type}]** (Page {region.page_num}) {bbox_str}{source_marker}\n"
+                    f"{region.markdown_content}\n"
+                )
+                
+                # Check for image
+                if region.image_path:
+                    region_text += f"\n![Region Image]({region.image_path})\n"
+                
+                # Show entities in this region
+                if region.entities_in_region:
+                    entities_names = []
+                    for eid in region.entities_in_region:
+                        entity_obj = self.graph.entity_relationship.get_entity(eid)
+                        if entity_obj:
+                            entities_names.append(entity_obj.name)
+                    if entities_names:
+                        region_text += f"_Contains entities: {', '.join(entities_names)}_\n"
+                
+                region_text += "\n"
                 context_parts.append(region_text)
                 total_tokens += len(region_text) // 4
 
@@ -403,17 +614,50 @@ class AdaptiveRetriever:
     def _hybrid_retrieval(self, query: str, level: QueryLevel) -> Dict[str, Any]:
         """
         Level 2: Hybrid entity + relationship traversal
-
-        2-hop graph traversal for complex reasoning
-        Enhanced with structured output and relationship evidence
+        Now enhanced with Hybrid Text Search
         """
-        # Get initial entities with ranking
+        # 1. Get initial entities with ranking
         entities, _ = self._search_entities_with_ranking(
             query, min(5, level.max_nodes), include_relationships=False
         )
+        
+        # 2. Hybrid Augmentation: Search Text If needed
+        text_regions = []
+        if not entities or len(entities) < 3:
+             print("  ℹ️ Transforming query for Hybrid Text Search...")
+             text_regions = self._search_text_tfidf(query, max_results=5)
+             
+             # Extract entities from these regions to seed graph traversal
+             for region in text_regions:
+                for eid in region.entities_in_region:
+                     if len(entities) < 5:
+                        e_obj = self.graph.entity_relationship.get_entity(eid)
+                        if e_obj and not any(e.entity_id == e_obj.entity_id for e in entities):
+                            # Create inferred entity
+                            retrieved = RetrievedEntity(
+                                entity_id=e_obj.entity_id,
+                                name=e_obj.name,
+                                entity_type=e_obj.entity_type,
+                                value=e_obj.value,
+                                description=e_obj.description,
+                                confidence=e_obj.confidence,
+                                mention_count=e_obj.mention_count,
+                                page_numbers=e_obj.page_numbers,
+                                relevance_score=0.6,
+                                is_initial=True, 
+                            )
+                            entities.append(retrieved)
 
-        if not entities:
-            return self._entity_lookup(query, level)
+        if not entities and not text_regions:
+            return {
+                "context": "",
+                "entities": [],
+                "relationships": [],
+                "regions": [],
+                "token_count": 0,
+                "nodes_retrieved": 0,
+                "error": "No relevant entities found for hybrid retrieval"
+            }
 
         # Expand through relationships (2-hop)
         entity_ids = set(e.entity_id for e in entities)
@@ -476,6 +720,13 @@ class AdaptiveRetriever:
         regions = self._search_regions_with_ranking(
             query, min(5, level.max_nodes), set(all_entity_ids)
         )
+        
+        # Merge with Text-based regions found earlier
+        existing_rids = {r.region_id for r in regions}
+        for tr in text_regions:
+            if tr.region_id not in existing_rids:
+                regions.append(tr)
+                existing_rids.add(tr.region_id)
 
         # Build context with full relationship information
         context_parts = []
@@ -592,6 +843,7 @@ class AdaptiveRetriever:
         return {
             "context": "".join(context_parts),
             "entities": [e.to_dict() for e in entities],
+            "relationships": [],  # Hierarchical focuses on entity groups, not relationships
             "regions": list(all_regions),
             "token_count": total_tokens,
             "nodes_retrieved": len(entities) + len(all_regions),
@@ -673,6 +925,7 @@ class AdaptiveRetriever:
         return {
             "context": "".join(context_parts),
             "entities": [e.to_dict() for e in entities],
+            "relationships": [],  # Visual fusion doesn't traverse relationships
             "regions": [r.node_id for r in visual_regions],
             "token_count": total_tokens,
             "nodes_retrieved": len(visual_regions) + len(entities),

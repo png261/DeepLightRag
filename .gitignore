@@ -182,3 +182,7 @@ config.yaml
 .env
 *.env
 config.yaml
+
+# Training artifacts
+setfit_query_classifier/
+setfit_training_output/

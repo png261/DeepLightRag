@@ -6,10 +6,9 @@ torchvision>=0.15.0
 pillow>=10.0.0
 accelerate>=0.24.0  # For GPU optimization
 
-# MLX (macOS only - install manually on Mac: pip install mlx mlx-lm mlx-vlm)
+# MLX (macOS only - install manually on Mac: pip install mlx mlx-lm)
 # mlx>=0.21.0
 # mlx-lm>=0.19.0
-# mlx-vlm>=0.0.12
 
 # PDF Processing
 pdf2image>=1.16.0
@@ -44,11 +43,11 @@ pandas>=2.0.0
 # Optional: For better OCR fallback
 easyocr>=1.7.0
 
-# Advanced NER with GLiNER
+# Advanced NER with GLiNER2 (includes unified entity + relation extraction)
 gliner>=0.1.12
 
-# Advanced Relation Extraction with OpenNRE
-opennre>=1.1.0
+# TOON Format for token-efficient LLM context (optional but recommended)
+toon-python>=0.1.0
 
 # SciSpaCy for scientific text processing (optional)
 # scispacy>=0.5.0

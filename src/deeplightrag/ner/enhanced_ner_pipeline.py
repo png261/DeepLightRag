@@ -49,7 +49,7 @@ class EnhancedNERPipeline:
         gliner_extractor: Optional[GLiNERExtractor] = None,
         enable_visual_grounding: bool = True,
         enable_cross_region_coreference: bool = True,
-        confidence_threshold: float = 0.3,
+        confidence_threshold: float = 0.5,
     ):
         """
         Initialize Enhanced NER Pipeline
@@ -97,12 +97,27 @@ class EnhancedNERPipeline:
 
         print(f"\n[NER] Processing {len(regions)} regions for entity extraction...")
 
-        # Process each region
-        for i, region in enumerate(regions):
-            print(f"  Processing region {i+1}/{len(regions)} ({region.block_type})")
+        # Process all regions using batch extraction for better performance
+        all_relationships = []
+        
+        # Prepare batch data
+        texts = [region.text_content for region in regions]
+        region_types = [region.block_type for region in regions]
+        
+        # Batch extraction using GLiNER2
+        batch_results = self.gliner_extractor.batch_extract_entities_and_relationships(
+            texts=texts,
+            region_types=region_types,
+            batch_size=8  # Process 8 regions at a time
+        )
 
-            # Extract entities from region text
-            region_entities = self._extract_entities_from_region(region)
+        # Process results and update metadata
+        for i, (region, (region_entities, region_relationships)) in enumerate(zip(regions, batch_results)):
+            # Update entities with region metadata
+            for entity in region_entities:
+                entity.metadata["region_id"] = region.region_id
+                entity.metadata["block_type"] = region.block_type
+                entity.metadata["page_num"] = region.page_num
 
             # Store entities by region
             entities_by_region[region.region_id] = region_entities
@@ -119,13 +134,22 @@ class EnhancedNERPipeline:
                 # Update region type statistics
                 self.processing_stats["entities_by_region_type"][region.block_type] += 1
 
+            # Add region relationships
+            all_relationships.extend(region_relationships)
+            
+        print(f"  ✅ Batch extraction complete: {len(all_entities)} entities, {len(all_relationships)} relationships")
+
         # Cross-region coreference resolution
         if self.enable_cross_region_coreference:
             all_entities = self._resolve_cross_region_coreference(all_entities, entities_by_region)
 
-        # Extract relationships between entities
-        print(f"\n[RE] Extracting relationships between {len(all_entities)} entities...")
-        relationships = self.extract_entity_relationships(all_entities, regions)
+        # Extract additional cross-region relationships if needed
+        if len(all_entities) > sum(len(entities) for entities in entities_by_region.values()):
+            print(f"\n[RE] Extracting cross-region relationships between {len(all_entities)} entities using GLiNER2...")
+            cross_region_relationships = self.extract_entity_relationships(all_entities, regions, relation_extractor="gliner2")
+            all_relationships.extend(cross_region_relationships)
+
+        relationships = all_relationships
 
         # Calculate confidence statistics
         confidences = [e.confidence for e in all_entities]
@@ -184,38 +208,7 @@ class EnhancedNERPipeline:
 
         return entities
 
-    def _get_focused_entity_types(self, block_type: str) -> List[str]:
-        """
-        Get focused entity types based on region block type
-
-        Args:
-            block_type: Type of visual region
-
-        Returns:
-            List of relevant entity types
-        """
-        # Map block types to relevant entity types
-        block_type_mapping = {
-            "header": ["CONCEPT", "TECHNICAL_TERM", "PRODUCT"],
-            "paragraph": [
-                "PERSON",
-                "ORGANIZATION",
-                "LOCATION",
-                "DATE_TIME",
-                "TECHNICAL_TERM",
-                "CONCEPT",
-            ],
-            "table": ["METRIC", "PERCENTAGE", "MONEY", "METRIC_RESULT", "DATE_TIME"],
-            "figure": ["REFERENCE", "METRIC_RESULT", "TECHNICAL_TERM"],
-            "caption": ["REFERENCE", "CONCEPT", "TECHNICAL_TERM"],
-            "list": ["TECHNICAL_TERM", "PRODUCT", "METHOD", "CONCEPT"],
-            "formula": ["TECHNICAL_TERM", "METHOD", "METRIC"],
-        }
-
-        # Get focused types, fallback to all types
-        focused_types = block_type_mapping.get(block_type, None)
-
-        return focused_types
+        return None
 
     def _add_visual_grounding(
         self, entities: List[ExtractedEntity], region: VisualRegion
@@ -365,7 +358,7 @@ class EnhancedNERPipeline:
                 entity_type=entity.label,
                 value=entity.normalized_form,
                 description=f"{entity.label} entity: {entity.text}",
-                source_regions=source_regions,
+                source_visual_regions=source_regions,
                 grounding_boxes=grounding_boxes,
                 block_type_context=block_type_context,
                 confidence=entity.confidence,
@@ -379,156 +372,91 @@ class EnhancedNERPipeline:
         return deeplightrag_entities
 
     def extract_entity_relationships(
-        self, entities: List[ExtractedEntity], regions: List[VisualRegion]
+        self, entities: List[ExtractedEntity], regions: List[VisualRegion],
+        relation_extractor: str = "gliner2"
     ) -> List[Relationship]:
         """
-        Extract relationships between entities using OpenNRE + patterns
+        Extract relationships between entities using GLiNER2
 
         Args:
             entities: List of extracted entities
             regions: List of visual regions
+            relation_extractor: Use 'gliner2' for relationship extraction
 
         Returns:
-            List of entity relationships
+            List of entity relationships extracted by GLiNER2
         """
+        if relation_extractor != "gliner2":
+            raise ValueError("Only GLiNER2 relation extractor is supported. Please set relation_extractor='gliner2'")
+
         relationships = []
 
-        # NEW: Try DeBERTa-based relation extraction first (highest accuracy)
-        try:
-            from .deberta_relation_extractor import DeBERTaRelationExtractor
-
-            if not hasattr(self, "_deberta_extractor"):
-                print("    🤖 Initializing DeBERTa relation extraction (ACE05/TACRED)...")
-                self._deberta_extractor = DeBERTaRelationExtractor(
-                    confidence_threshold=0.5, device="auto"
-                )
-
-            # Extract relations using DeBERTa
-            all_deberta_relations = []
-            entities_by_region = defaultdict(list)
-
-            for entity in entities:
-                region_id = entity.metadata.get("region_id", "unknown")
-                entities_by_region[region_id].append(entity)
-
-            # Process each region
-            for region_id, region_entities in entities_by_region.items():
-                if len(region_entities) < 2:
-                    continue
-
-                region = next((r for r in regions if r.region_id == region_id), None)
-                if not region:
-                    continue
-
-                region_relations = self._deberta_extractor.extract_relations_from_entities(
-                    entities=region_entities, text=region.text_content, region=region
-                )
-                all_deberta_relations.extend(region_relations)
-
-            # Convert to DeepLightRAG format
-            if all_deberta_relations:
-                relationships = self._deberta_extractor.convert_to_deeplightrag_relationships(
-                    deberta_relations=all_deberta_relations, document_id="pipeline_extract"
-                )
-
-                print(
-                    f"    ✅ DeBERTa extracted {len(relationships)} relationships ({len(all_deberta_relations)} total)"
-                )
-                return relationships
-            else:
-                print(f"    ⚠️ DeBERTa found no relationships, trying OpenNRE fallback...")
-
-        except Exception as e:
-            print(f"    ❌ DeBERTa extraction failed: {e}")
-            print(f"    🔄 Falling back to OpenNRE...")
-
-        # FALLBACK 1: Try OpenNRE-based relation extraction
-        try:
-            from .relation_extractor import RelationExtractionPipeline
-
-            if not hasattr(self, "_relation_pipeline"):
-                print("    🔗 Initializing OpenNRE relation extraction pipeline...")
-                self._relation_pipeline = RelationExtractionPipeline()
-
-            # Extract relations using OpenNRE + patterns
-            result = self._relation_pipeline.process_entities_for_relations(
-                entities=entities, regions=regions, document_id="pipeline_extract"
-            )
-
-            relationships = result["relationships"]
-
-            if len(relationships) > 0:
-                print(f"    ✅ OpenNRE extracted {len(relationships)} relationships")
-                return relationships
-            else:
-                print(f"    ⚠️ OpenNRE found no relationships, trying pattern fallback...")
-
-        except Exception as e:
-            print(f"    ❌ OpenNRE extraction failed: {e}")
-            print(f"    🔄 Falling back to LLM extraction...")
-
-        # FALLBACK 2: Original co-occurrence relationships
+        # Use GLiNER2 for relationship extraction
+        all_gliner2_relations = []
         entities_by_region = defaultdict(list)
+
         for entity in entities:
             region_id = entity.metadata.get("region_id", "unknown")
             entities_by_region[region_id].append(entity)
 
-        # Extract co-occurrence relationships within regions
+        # Process each region
         for region_id, region_entities in entities_by_region.items():
             if len(region_entities) < 2:
                 continue
 
-            # Find corresponding region
             region = next((r for r in regions if r.region_id == region_id), None)
             if not region:
                 continue
 
-            # Create co-occurrence relationships
-            for i, entity1 in enumerate(region_entities):
-                for entity2 in region_entities[i + 1 :]:
-                    relationship = self._create_cooccurrence_relationship(entity1, entity2, region)
-                    if relationship:
-                        relationships.append(relationship)
+            # Extract relationships using GLiNER2
+            region_relations = self.gliner_extractor.extract_relationships(
+                text=region.text_content,
+                entities=region_entities,
+                region_type=region.block_type
+            )
+            all_gliner2_relations.extend(region_relations)
 
-        print(f"    📊 Co-occurrence extraction found {len(relationships)} relationships")
+        # Filter and convert GLiNER2 relations to DeepLightRAG format
+        for relation in all_gliner2_relations:
+            # Quality filter: Only keep high-confidence relations
+            confidence = relation.get('confidence', 0.0)
+            
+            # Apply stricter thresholds based on extraction method
+            extraction_method = relation.get('metadata', {}).get('extraction_method', 'unknown')
+            
+            if extraction_method == 'co-occurrence' and confidence < 0.6:
+                continue  # Skip low-confidence co-occurrence relations
+            elif extraction_method == 'gliner2-schema' and confidence < 0.75:
+                continue  # Skip low-confidence schema relations
+            elif confidence < 0.5:
+                continue  # Skip very low confidence relations
+            
+            # Skip RELATED_TO relations if we have more specific relations
+            if relation['relation_type'] == 'RELATED_TO' and confidence < 0.7:
+                continue
+            
+            # Create relationship ID
+            relation_id = f"rel_{relation['source_entity_id']}_{relation['target_entity_id']}_{relation['relation_type'].lower()}"
+
+            # Create DeepLightRAG Relationship object
+            dlr_relationship = Relationship(
+                relationship_id=relation_id,
+                source_entity_id=relation['source_entity_id'],
+                target_entity_id=relation['target_entity_id'],
+                relationship_type=relation['relation_type'],
+                confidence=confidence,
+                description=f"{relation['relation_type']}: {relation['source_entity']} -> {relation['target_entity']}",
+                context=relation['context'],
+                metadata=relation['metadata']
+            )
+            relationships.append(dlr_relationship)
+
+        if relationships:
+            print(f"    ✅ GLiNER2 schema extracted {len(relationships)} relationships")
+        else:
+            print(f"    ℹ️ GLiNER2 schema found no relationships")
+
         return relationships
-
-    def _create_cooccurrence_relationship(
-        self, entity1: ExtractedEntity, entity2: ExtractedEntity, region: VisualRegion
-    ) -> Optional[Relationship]:
-        """Create a co-occurrence relationship between two entities"""
-
-        # Calculate distance between entities in text
-        distance = abs(entity1.start - entity2.start)
-        max_distance = 200  # Maximum character distance for relationship
-
-        if distance > max_distance:
-            return None
-
-        # Determine relationship strength based on distance and context
-        weight = max(0.1, 1.0 - (distance / max_distance))
-
-        # Create relationship
-        relationship = Relationship(
-            source_entity=f"entity_{entity1.text}_{entity1.label}",
-            target_entity=f"entity_{entity2.text}_{entity2.label}",
-            relationship_type="co_occurs_with",
-            description=f"{entity1.text} co-occurs with {entity2.text} in {region.block_type}",
-            weight=weight,
-            spatial_cooccurrence=True,
-            layout_aware_type=f"co_occurrence_{region.block_type}",
-            source_regions=[region.region_id],
-            evidence_text=region.text_content[
-                min(entity1.start, entity2.start) : max(entity1.end, entity2.end)
-            ],
-            metadata={
-                "distance": distance,
-                "region_type": region.block_type,
-                "page_num": region.page_num,
-            },
-        )
-
-        return relationship
 
     def get_processing_stats(self) -> Dict[str, Any]:
         """Get processing statistics"""
